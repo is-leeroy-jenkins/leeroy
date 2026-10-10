@@ -52,3 +52,10 @@ Mkfile.old
 dkms.conf
 /models
 !/models/Leeroy-3B-Instruct.Q4_K_M.gguf
+
+# Application packaging
+build/
+dist/
+dist-installer/
+*.egg-info/
+__pycache__/

@@ -1,0 +1,15 @@
+include requirements-runtime.txt requirements-desktop.txt requirements.txt
+include README.md pyproject.toml
+include *.py
+include .streamlit/config.toml
+recursive-include resources *.png *.ico
+prune stores
+prune logging
+prune logs
+prune site
+prune docs
+prune models
+prune ipynb
+global-exclude __pycache__ *.py[cod] *.db *.sqlite secrets.toml .env
+
+global-exclude *.gguf

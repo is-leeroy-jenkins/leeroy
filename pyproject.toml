@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leeroy-py"
+version = "0.1.0"
+description = "Local GGUF Streamlit assistant for chat, document retrieval, embeddings, and analysis"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+authors = [{name = "Terry Eppler"}]
+license = "MIT"
+dynamic = ["dependencies"]
+
+[project.urls]
+Homepage = "https://github.com/is-leeroy-jenkins/leeroy"
+Documentation = "https://is-leeroy-jenkins.github.io/leeroy/"
+Issues = "https://github.com/is-leeroy-jenkins/leeroy/issues"
+
+[project.scripts]
+leeroy = "leeroy.cli:desktop"
+leeroy-browser = "leeroy.cli:main"
+
+[tool.setuptools]
+packages = ["leeroy"]
+package-dir = {leeroy = "."}
+include-package-data = false
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements-runtime.txt"]}
+
+[tool.setuptools.package-data]
+leeroy = ["resources/**/*.png", "resources/**/*.ico", ".streamlit/config.toml"]
+

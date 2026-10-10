@@ -8,7 +8,7 @@
   <a href="#-application-modes">Modes</a> ·
   <a href="https://github.com/is-leeroy-jenkins/Leeroy/blob/main/requirements.txt">Requirements</a> ·
   <a href="#-local-llm">LLM</a> ·
-  <a href="#-installation">Installation</a> ·
+  <a href="resources/installation.md">Installation</a> ·
   <a href="#-running-the-streamlit-application">Run</a> ·
   <a href="#%EF%B8%8F-configuration">Configuration</a> ·
   <a href="#-design-and-architecture">Architecture</a> ·
@@ -598,3 +598,17 @@ Leeroy exposes the following active runtime parameters in the UI and footer:
 Leeroy is published under the [MIT License](https://github.com/is-leeroy-jenkins/Leeroy/blob/main/LICENSE).
 
 
+
+## PyPI application
+
+```powershell
+python -m pip install leeroy-py
+leeroy
+```
+
+`leeroy` opens the tabless Windows WebView2 window by default;
+`leeroy-browser` opens standard browser mode. Python 3.11–3.12 is supported.
+The distribution is `leeroy-py`; the import is `leeroy`.
+The GGUF model is supplied separately. Set `LEEROY_LLM_PATH` to its absolute
+path and `ENABLE_LOCAL_LLM=true` before launching local inference.
+See [installation](resources/installation.md) and [publication](resources/pypi-release.md).
