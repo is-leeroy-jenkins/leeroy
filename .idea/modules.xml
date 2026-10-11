@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/Leeroy.iml" filepath="$PROJECT_DIR$/.idea/Leeroy.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/leeroy-py.iml" filepath="$PROJECT_DIR$/.idea/leeroy-py.iml" />
     </modules>
   </component>
 </project>
