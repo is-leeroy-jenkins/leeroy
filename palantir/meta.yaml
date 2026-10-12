@@ -1,0 +1,84 @@
+package:
+  name: '{{ PACKAGE_NAME }}'
+  version: '{{ PACKAGE_VERSION }}'
+
+source:
+  path: ../src
+
+requirements:
+  run:
+    # Foundry Jupyter Workspace / Linux x86-64 / Python 3.13
+    - python 3.13.*
+    - ipykernel
+    - pip
+    - foundry-transforms-lib-python
+    - streamlit
+
+    # Google services and hosted APIs
+    - google-genai
+    - google-cloud-storage
+    - httpx>=0.28.1
+    - requests==2.32.4
+    - tiktoken
+
+    # Numerical data and visualization
+    # Original: numpy==1.26.4; upgraded for Python 3.13
+    - numpy>=2,<3
+    - openpyxl
+    - plotly
+    - pillow>=10.0.0
+    # Original: scikit-learn==1.5.1 and scipy==1.13.1
+    - scikit-learn
+    - scipy
+
+    # Document processing and reporting
+    - pymupdf
+    - reportlab>=4.0.8
+
+    # Local inference and embeddings (CPU intended; build unverified)
+    # Original: sentence-transformers==2.7.0; Bro-tested pin
+    - sentence-transformers==5.1.2
+    # Original: transformers==4.41.2 and huggingface_hub==0.23.4
+    - transformers>=4.41,<5
+    - huggingface_hub>=0.34,<1
+    # Original: torch==2.3.1 and torchvision==0.18.1
+    # Check that the selected PyTorch/TorchVision builds match.
+    - pytorch>=2.4,<2.7
+    - torchvision
+    # Original: tokenizers==0.19.1 and safetensors==0.4.3
+    - tokenizers
+    - safetensors
+    # Original: sentencepiece==0.2.0
+    - sentencepiece
+
+    # Compatibility libraries
+    - pydantic>=2.7,<2.10
+    - typing_extensions>=4.11,<5
+    # Original: regex==2024.5.15 and tqdm==4.66.4
+    - regex
+    - tqdm
+    # Original: fsspec==2024.6.1 and packaging==24.1
+    - fsspec
+    - packaging
+    # Original: pyyaml==6.0.1
+    - pyyaml
+
+    # Streamlit PDF extension
+    - streamlit-pdf
+
+    # Documentation / development
+    - mkdocs
+    - mkdocs-material
+    # Original extra: mkdocstrings[python]
+    - mkdocstrings
+    - mkdocstrings-python
+    - mkdocs-autorefs
+    - pymdown-extensions
+    - black
+
+    # Unresolved source requirements; NOT installed by this manifest
+    # - sqlite-vec       # Conda availability and SQLite extension ABI unverified
+    # - streamlit-extras # PyPI-discoverable; Conda and UV installation failures observed
+
+    # Known Foundry baseline conflict; not a Leeroy source requirement
+    # - python_sdk>=0.1.0

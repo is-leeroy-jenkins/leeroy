@@ -1,0 +1,3668 @@
+'''
+	******************************************************************************************
+	    Assembly:                Leeroy
+	    Filename:                app.py
+	    Author:                  Terry D. Eppler
+	    Created:                 05-31-2024
+	
+	    Last Modified By:        Terry D. Eppler
+	    Last Modified On:        05-01-2025
+	******************************************************************************************
+	<copyright file="app.py" company="Terry D. Eppler">
+	
+	           Leeroy is a data analysis tool integrating various Generative GPT, Text-Processing, and
+	           Machine-Learning algorithms for federal analysts.
+	           Copyright ©  2022  Terry Eppler
+	
+	   Permission is hereby granted, free of charge, to any person obtaining a copy
+	   of this software and associated documentation files (the “Software”),
+	   to deal in the Software without restriction,
+	   including without limitation the rights to use,
+	   copy, modify, merge, publish, distribute, sublicense,
+	   and/or sell copies of the Software,
+	   and to permit persons to whom the Software is furnished to do so,
+	   subject to the following conditions:
+	
+	   The above copyright notice and this permission notice shall be included in all
+	   copies or substantial portions of the Software.
+	
+	   THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+	   INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+	   FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
+	   IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+	   DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+	   ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+	   DEALINGS IN THE SOFTWARE.
+	
+	   You can contact me at:  terryeppler@gmail.com or eppler.terry@epa.gov
+	
+	</copyright>
+	<summary>
+	  app.py
+	</summary>
+	******************************************************************************************
+'''
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import math
+import re
+import sqlite3
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+import fitz  # pymupdf
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+
+import config as cfg
+from boogr import Error, Logger
+
+# ==============================================================================
+# Model Path Resolution
+# ==============================================================================
+MODEL_PATH_OBJ = Path( cfg.MODEL_PATH ) if cfg.MODEL_PATH else None
+LOCAL_MODEL_AVAILABLE = bool( MODEL_PATH_OBJ and MODEL_PATH_OBJ.is_file( ) )
+
+def write_error( error: Exception, cause: str, method: str ) -> None:
+	"""Write an application error record without interrupting fallback handling.
+
+	Purpose:
+		Wraps a caught exception in the project ``Error`` object and writes it through the
+		SQLite-backed ``Logger``. The helper is used by existing fallback handlers that must
+		preserve their original return behavior while still recording diagnostic metadata.
+
+	Args:
+		error: Caught exception instance to wrap and persist.
+		cause: Logical workflow component associated with the failure.
+		method: Stable function or method signature associated with the failure.
+	"""
+	try:
+		exception = Error( error )
+		exception.module = 'app'
+		exception.cause = cause
+		exception.method = method
+		Logger( ).write( exception )
+	except Exception:
+		return None
+
+def local_llm_available( ) -> bool:
+	"""Determine whether the configured local model file is available.
+
+	Purpose:
+		Checks the resolved model-path state created during module import and returns whether
+		the optional local GGUF file exists in the current execution environment. This helper
+		allows the Streamlit UI and local model loader to degrade safely when the model file
+		is not present.
+
+	Returns:
+		bool: Return value produced by the operation.
+	"""
+	try:
+		return bool( LOCAL_MODEL_AVAILABLE )
+	except Exception as e:
+		write_error( e, 'local_llm', 'local_llm_available( ) -> bool' )
+		return False
+
+st.set_page_config( page_title='Leeroy', layout='wide', page_icon=cfg.FAVICON if (cfg.ROOT_DIR / cfg.FAVICON).is_file() else None )
+
+# ==============================================================================
+# SESSION STATE INITIALIZATION
+# ==============================================================================
+
+if 'mode' not in st.session_state:
+	st.session_state[ 'mode' ] = ''
+
+if 'messages' not in st.session_state:
+	st.session_state[ 'messages' ] = [ ]
+
+if 'system_instructions' not in st.session_state:
+	st.session_state[ 'system_instructions' ] = ''
+
+if 'context_window' not in st.session_state:
+	st.session_state[ 'context_window' ] = 0
+
+if 'cpu_threads' not in st.session_state:
+	st.session_state[ 'cpu_threads' ] = 0
+
+if 'max_tokens' not in st.session_state:
+	st.session_state[ 'max_tokens' ] = 0
+
+if 'temperature' not in st.session_state:
+	st.session_state[ 'temperature' ] = 0.0
+
+if 'top_percent' not in st.session_state:
+	st.session_state[ 'top_percent' ] = 0.0
+
+if 'top_k' not in st.session_state:
+	st.session_state[ 'top_k' ] = 0
+
+if 'frequency_penalty' not in st.session_state:
+	st.session_state[ 'frequency_penalty' ] = 0.0
+
+if 'presense_penalty' not in st.session_state:
+	st.session_state[ 'presense_penalty' ] = 0.0
+
+if 'repeat_penalty' not in st.session_state:
+	st.session_state[ 'repeat_penalty' ] = 0.0
+
+if 'repeat_window' not in st.session_state:
+	st.session_state[ 'repeat_window' ] = 0
+
+if 'random_seed' not in st.session_state:
+	st.session_state[ 'random_seed' ] = 0
+
+if 'basic_docs' not in st.session_state:
+	st.session_state[ 'basic_docs' ] = [ ]
+
+if 'use_semantic' not in st.session_state:
+	st.session_state[ 'use_semantic' ] = False
+
+if 'is_grounded' not in st.session_state:
+	st.session_state[ 'is_grounded' ] = False
+
+if 'selected_prompt_id' not in st.session_state:
+	st.session_state[ 'selected_prompt_id' ] = ''
+
+if 'pending_system_prompt_name' not in st.session_state:
+	st.session_state[ 'pending_system_prompt_name' ] = ''
+
+if 'text_instruction_category' not in st.session_state:
+	st.session_state[ 'text_instruction_category' ] = None
+
+if 'text_instruction_prompt_id' not in st.session_state:
+	st.session_state[ 'text_instruction_prompt_id' ] = None
+
+if 'docqna_instruction_category' not in st.session_state:
+	st.session_state[ 'docqna_instruction_category' ] = None
+
+if 'docqna_instruction_prompt_id' not in st.session_state:
+	st.session_state[ 'docqna_instruction_prompt_id' ] = None
+
+if 'active_prompt_id' not in st.session_state:
+	st.session_state[ 'active_prompt_id' ] = None
+
+if 'active_prompt_caption' not in st.session_state:
+	st.session_state[ 'active_prompt_caption' ] = ''
+
+if 'active_prompt_name' not in st.session_state:
+	st.session_state[ 'active_prompt_name' ] = ''
+
+if 'active_prompt_category' not in st.session_state:
+	st.session_state[ 'active_prompt_category' ] = ''
+
+# -------- DOCQNA ---------------------
+
+if 'uploaded' not in st.session_state:
+	st.session_state[ 'uploaded' ] = [ ]
+
+if 'active_docs' not in st.session_state:
+	st.session_state[ 'active_docs' ] = [ ]
+
+if 'doc_bytes' not in st.session_state:
+	st.session_state[ 'doc_bytes' ] = { }
+
+if 'doc_source' not in st.session_state:
+	st.session_state[ 'doc_source' ] = 'uploadlocal'
+
+if 'docqna_vec_ready' not in st.session_state:
+	st.session_state[ 'docqna_vec_ready' ] = False
+
+if 'docqna_fingerprint' not in st.session_state:
+	st.session_state[ 'docqna_fingerprint' ] = ''
+
+if 'docqna_chunk_count' not in st.session_state:
+	st.session_state[ 'docqna_chunk_count' ] = 0
+
+if 'docqna_fallback_rows' not in st.session_state:
+	st.session_state[ 'docqna_fallback_rows' ] = [ ]
+
+# ------- TOKEN PARAMATERS  ---------------------------
+if 'last_answer' not in st.session_state:
+	st.session_state.last_answer = ''
+
+if 'last_sources' not in st.session_state:
+	st.session_state.last_sources = [ ]
+
+if 'last_analysis' not in st.session_state:
+	st.session_state.last_analysis = {
+			'tables': [ ],
+			'docqna_files': [ ],
+			'text': [ ],
+	}
+
+if 'last_call_usage' not in st.session_state:
+	st.session_state.last_call_usage = {
+			'prompt_tokens': 0,
+			'completion_tokens': 0,
+			'total_tokens': 0, }
+
+if 'token_usage' not in st.session_state:
+	st.session_state.token_usage = { 'prompt_tokens': 0,
+	                                 'completion_tokens': 0,
+	                                 'total_tokens': 0, }
+
+# ==============================================================================
+# UTILITIES
+# ==============================================================================
+
+def throw_if( name: str, value: object ) -> None:
+	"""Throw if.
+	
+	Purpose:
+	    Validates that a required argument contains a usable value before the surrounding workflow
+	    continues. This guard centralizes early validation so provider wrappers and UI routines
+	    fail
+	    with consistent, readable error messages.
+	
+	Args:
+	    name (str): Name value used by the operation.
+	    value (object): Value value used by the operation.
+	
+	Returns:
+	    None: This function performs its work through side effects and does not return a value."""
+	if value is None:
+		raise ValueError( f'Argument "{name}" cannot be None.' )
+	
+	if isinstance( value, str ) and not value.strip( ):
+		raise ValueError( f'Argument "{name}" cannot be empty.' )
+	
+def image_to_base64( path: str ) -> str:
+	"""Convert an image file to a Base64 text string.
+
+	Purpose:
+		Reads a local image file and converts the raw bytes into a Base64-encoded string that
+		can be embedded in Streamlit or Markdown output. The helper supports UI image
+		rendering workflows that need inline image data.
+
+	Args:
+		path: Filesystem path to the image file.
+
+	Returns:
+		str: Return value produced by the operation.
+	"""
+	with open( path, "rb" ) as f:
+		return base64.b64encode( f.read( ) ).decode( )
+
+def cosine_sim( a: np.ndarray, b: np.ndarray ) -> float:
+	"""Calculate cosine similarity between two vectors.
+
+	Purpose:
+		Computes normalized dot-product similarity for semantic retrieval, document chunk
+		ranking, and fallback vector matching when sqlite-vec is unavailable. The helper
+		returns a safe zero score when either vector has zero magnitude.
+
+	Args:
+		a: First vector.
+		b: Second vector.
+
+	Returns:
+		float: Return value produced by the operation.
+	"""
+	denom = np.linalg.norm( a ) * np.linalg.norm( b )
+	return float( np.dot( a, b ) / denom ) if denom else 0.0
+
+def initialize_database( ) -> None:
+	"""Create required application database tables.
+
+	Purpose:
+		Ensures the local SQLite storage directory exists and creates the tables required for
+		chat history, semantic embeddings, and categorized prompt templates.
+
+	Raises:
+		Error: Raised when SQLite initialization fails after writing diagnostic metadata.
+	"""
+	Path( cfg.DB_PATH ).parent.mkdir( parents=True, exist_ok=True )
+	with sqlite3.connect( cfg.DB_PATH ) as conn:
+		conn.execute(
+			"""
+            CREATE TABLE IF NOT EXISTS chat_history
+            (
+                id
+                INTEGER
+                PRIMARY
+                KEY
+                AUTOINCREMENT,
+                role
+                TEXT,
+                content
+                TEXT
+            )
+			"""
+		)
+		
+		conn.execute(
+			"""
+            CREATE TABLE IF NOT EXISTS embeddings
+            (
+                id
+                INTEGER
+                PRIMARY
+                KEY
+                AUTOINCREMENT,
+                chunk
+                TEXT,
+                vector
+                BLOB
+            )
+			"""
+		)
+		
+		conn.execute(
+			"""
+            CREATE TABLE IF NOT EXISTS Prompts
+            (
+				ID INTEGER NOT NULL UNIQUE,
+				Caption TEXT(80),
+				Name TEXT(80),
+				Category TEXT(80),
+				Text TEXT(2048),
+				PRIMARY KEY(ID AUTOINCREMENT)
+			)
+			"""
+		)
+		
+		conn.commit( )
+
+# -------- CHAT/TEXT UTILITIES --------------------
+
+def normalize_text( text: str ) -> str:
+	"""Normalize text for matching and comparison workflows.
+
+	Purpose:
+		Standardizes free text by lowercasing content, removing punctuation except sentence
+		delimiters, normalizing sentence-boundary spacing, and collapsing repeated whitespace.
+		The helper supports prompt, document, and search workflows that need consistent text
+		comparison behavior.
+
+	Args:
+		text: Source text to process.
+
+	Returns:
+		str: Return value produced by the operation.
+	"""
+	if not text:
+		return ""
+	
+	# Lowercase
+	text = text.lower( )
+	
+	# Remove punctuation except . ! ?
+	text = re.sub( r"[^\w\s\.\!\?]", "", text )
+	
+	# Ensure single space after sentence delimiters
+	text = re.sub( r"([.!?])\s*", r"\1 ", text )
+	
+	# Normalize whitespace
+	text = re.sub( r"\s+", " ", text ).strip( )
+	
+	return text
+
+def chunk_text( text: str, size: int = 1200, overlap: int = 200 ) -> List[ str ]:
+	"""Split text into overlapping chunks.
+
+	Purpose:
+		Creates overlapping text windows used by semantic indexing, retrieval-augmented
+		generation, and document Q&A workflows. The overlap preserves local context across
+		chunk boundaries so retrieved excerpts remain coherent.
+
+	Args:
+		text: Source text to process.
+		size: Maximum character length for each chunk.
+		overlap: Number of characters shared between adjacent chunks.
+
+	Returns:
+		list[str]: Return value produced by the operation.
+	"""
+	if size <= 0 or overlap < 0 or overlap >= size:
+		raise ValueError( 'Chunk size must be positive and overlap must be between zero and size minus one.' )
+	if not text:
+		return [ ]
+	chunks, i = [ ], 0
+	while i < len( text ):
+		chunks.append( text[ i:i + size ] )
+		if i + size >= len( text ):
+			break
+		i += size - overlap
+	return chunks
+
+def convert_xml( text: str ) -> str:
+	"""Convert XML-like prompt sections into Markdown.
+
+	Purpose:
+		Transforms prompt text containing XML-like opening and closing tags into Markdown
+		section blocks. The function treats tags as lightweight section delimiters instead of
+		strict XML, allowing prompt templates to be rendered more clearly in the UI.
+
+	Args:
+		text: Source text to process.
+
+	Returns:
+		str: Return value produced by the operation.
+	"""
+	markdown_blocks: List[ str ] = [ ]
+	for match in cfg.XML_BLOCK_PATTERN.finditer( text ):
+		raw_tag: str = match.group( "tag" )
+		body: str = match.group( "body" ).strip( )
+		
+		# Humanize tag name for Markdown heading
+		heading: str = raw_tag.replace( "_", " " ).replace( "-", " " ).title( )
+		markdown_blocks.append( f"## {heading}" )
+		if body:
+			markdown_blocks.append( body )
+	return "\n\n".join( markdown_blocks )
+
+def markdown_converter( text: Any ) -> str:
+	"""Convert between Markdown headings and XML-like heading tags.
+
+	Purpose:
+		Auto-detects whether the supplied text contains simple hN heading tags or Markdown
+		heading syntax. HTML-like headings are converted to Markdown headings; otherwise
+		Markdown headings are converted to matching hN tags. Non-string or empty inputs return
+		an empty string.
+
+	Args:
+		text: Source text to process.
+
+	Returns:
+		str: Return value produced by the operation.
+	"""
+	if not isinstance( text, str ) or not text.strip( ):
+		return ""
+	
+	# Normalize newlines
+	src = text.replace( "\r\n", "\n" ).replace( "\r", "\n" )
+	
+	htag_pattern = re.compile( r"<h([1-6])>(.*?)</h\1>", flags=re.IGNORECASE | re.DOTALL )
+	md_heading_pattern = re.compile( r"^(#{1,6})[ \t]+(.+?)[ \t]*$", flags=re.MULTILINE )
+	
+	# ------------------------------------------------------------------
+	# Direction detection
+	# ------------------------------------------------------------------
+	contains_htags = bool( htag_pattern.search( src ) )
+	
+	# ------------------------------------------------------------------
+	# XML-like heading tags -> Markdown headings
+	# ------------------------------------------------------------------
+	if contains_htags:
+		def _htag_to_md( match: re.Match ) -> str:
+			level = int( match.group( 1 ) )
+			content = match.group( 2 ).strip( )
+			
+			# Preserve inner newlines safely by collapsing interior whitespace
+			# while keeping content readable.
+			content = re.sub( r"[ \t]+\n", "\n", content )
+			content = re.sub( r"\n[ \t]+", "\n", content )
+			
+			return f"{'#' * level} {content}"
+		
+		out = htag_pattern.sub( _htag_to_md, src )
+		return out.strip( )
+	
+	# ------------------------------------------------------------------
+	# Markdown headings -> XML-like heading tags
+	# ------------------------------------------------------------------
+	def _md_to_htag( match: re.Match ) -> str:
+		hashes = match.group( 1 )
+		content = match.group( 2 ).strip( )
+		level = len( hashes )
+		return f"<h{level}>{content}</h{level}>"
+	
+	out = md_heading_pattern.sub( _md_to_htag, src )
+	return out.strip( )
+
+def inject_response_css( ) -> None:
+	"""Inject chat-response CSS into the Streamlit page.
+
+	Purpose:
+		Adds inline CSS that styles chat-message paragraphs, headings, and links inside
+		Streamlit chat responses. The style layer keeps generated responses visually
+		consistent with the Leeroy dark-mode interface and shared blue accent color.
+	"""
+	st.markdown(
+		"""
+		<style>
+		/* Chat message text */
+		.stChatMessage p {
+			color: rgb(220, 220, 220);
+			font-size: 1rem;
+			line-height: 1.6;
+		}
+
+		/* Headings inside chat responses */
+		.stChatMessage h1 {
+			color: rgb(0, 120, 252); /* DoD Blue */
+			font-size: 1.6rem;
+		}
+
+		.stChatMessage h2 {
+			color: rgb(0, 120, 252);
+			font-size: 1.35rem;
+		}
+
+		.stChatMessage h3 {
+			color: rgb(0, 120, 252);
+			font-size: 1.15rem;
+		}
+		
+		.stChatMessage a {
+			color: rgb(0, 120, 252); /* DoD Blue */
+			text-decoration: underline;
+		}
+		
+		.stChatMessage a:hover {
+			color: rgb(80, 160, 255);
+		}
+
+		</style>
+		""", unsafe_allow_html=True )
+
+def style_subheaders( ) -> None:
+	"""Inject shared subheader CSS into the Streamlit page.
+
+	Purpose:
+		Applies the Leeroy blue accent color to selected Markdown and chat subheaders in the
+		main Streamlit UI. The helper centralizes visual styling used by sidebar and mode-
+		rendering sections.
+	"""
+	st.markdown(
+		"""
+		<style>
+		div[data-testid="stMarkdownContainer"] h2,
+		div[data-testid="stMarkdownContainer"] h3,
+		div[data-testid="stChatMessage"] div[data-testid="stMarkdownContainer"] h2,
+		div[data-testid="stChatMessage"] div[data-testid="stMarkdownContainer"] h3 {
+			color: rgb(0, 120, 252) !important;
+		}
+		</style>
+		""",
+		unsafe_allow_html=True, )
+
+def save_message( role: str, content: str ) -> None:
+	"""Persist a chat message to SQLite.
+
+	Purpose:
+		Writes a single chat-history record to the configured application database. The
+		function supports durable conversation history for the Text Generation and Document
+		Q&A modes.
+
+	Args:
+		role: Chat role associated with the message.
+		content: Message content to store.
+	"""
+	with sqlite3.connect( cfg.DB_PATH ) as conn:
+		conn.execute( 'INSERT INTO chat_history (role, content) VALUES (?, ?)', (role, content) )
+
+def load_history( ) -> List[ Tuple[ str, str ] ]:
+	"""Load persisted chat history from SQLite.
+
+	Purpose:
+		Reads stored chat messages in insertion order so Streamlit session state can be
+		reconstructed when the application starts or reruns.
+
+	Returns:
+		list[tuple[str, str]]: Return value produced by the operation.
+	"""
+	with sqlite3.connect( cfg.DB_PATH ) as conn:
+		return conn.execute( 'SELECT role, content FROM chat_history ORDER BY id' ).fetchall( )
+
+def clear_history( ) -> None:
+	"""Delete persisted chat history.
+
+	Purpose:
+		Removes all rows from the SQLite chat_history table so the Streamlit chat UI can be
+		reset without affecting prompt templates, embeddings, or imported data.
+	"""
+	with sqlite3.connect( cfg.DB_PATH ) as conn:
+		conn.execute( "DELETE FROM chat_history" )
+
+# -------- PROMPT ENGINEERING UTILITIES ----------------
+
+def supports_prompt_category( category: str ) -> bool:
+	"""Determine whether a prompt category fits the local text model.
+
+	Purpose:
+		Excludes categories that clearly require unsupported image, audio, video, speech, or
+		hosted-tool capabilities while retaining text, code, retrieval, and document workflows.
+
+	Args:
+		category: Stored prompt category name.
+
+	Returns:
+		bool: True when the category is suitable for Leeroy's local Llama 3.2 model.
+	"""
+	unsupported_terms = ( 'audio', 'computer use', 'hosted tool', 'image', 'speech',
+		'text-to-speech', 'video', 'vision' )
+	category_name = category.casefold( )
+	return not any( term in category_name for term in unsupported_terms )
+
+def fetch_prompt_categories( db_path: str ) -> List[ str ]:
+	"""Retrieve prompt categories supported by the local text model.
+
+	Purpose:
+		Reads distinct category names from the configured Prompts table and returns the
+		alphabetically ordered categories that fit Leeroy's text-only local model.
+
+	Args:
+		db_path: SQLite database path.
+
+	Returns:
+		list[str]: Supported prompt categories.
+	"""
+	try:
+		with sqlite3.connect( db_path ) as conn:
+			rows = conn.execute(
+				"SELECT DISTINCT Category FROM Prompts "
+				"WHERE Category IS NOT NULL AND TRIM(Category) <> '' ORDER BY Category;"
+			).fetchall( )
+		return [ str( row[ 0 ] ) for row in rows if supports_prompt_category( str( row[ 0 ] ) ) ]
+	except Exception as e:
+		write_error( e, 'prompts', 'fetch_prompt_categories( db_path: str ) -> List[str]' )
+		return [ ]
+
+def fetch_prompt_choices( db_path: str, category: str ) -> List[ Tuple[ int, str ] ]:
+	"""Retrieve prompt identifiers and display labels for a category.
+
+	Purpose:
+		Loads category-filtered prompt choices using the primary key as the selector value and
+		Caption plus Name as the human-readable label.
+
+	Args:
+		db_path: SQLite database path.
+		category: Selected prompt category.
+
+	Returns:
+		list[tuple[int, str]]: Prompt identifiers paired with display labels.
+	"""
+	if not category:
+		return [ ]
+
+	try:
+		with sqlite3.connect( db_path ) as conn:
+			rows = conn.execute(
+				"SELECT ID, Caption, Name FROM Prompts WHERE Category = ? "
+				"ORDER BY Caption, Name, ID;", (category,) ).fetchall( )
+		choices: List[ Tuple[ int, str ] ] = [ ]
+		for prompt_id, caption, name in rows:
+			caption_text = str( caption or '' ).strip( )
+			name_text = str( name or '' ).strip( )
+			label = caption_text
+			if name_text and name_text != caption_text:
+				label = f'{caption_text} — {name_text}' if caption_text else name_text
+			if not label:
+				label = f'Prompt {prompt_id}'
+			choices.append( (int( prompt_id ), label) )
+		return choices
+	except Exception as e:
+		write_error( e, 'prompts',
+			'fetch_prompt_choices( db_path: str, category: str ) -> List[Tuple[int, str]]' )
+		return [ ]
+
+def fetch_prompts( ) -> pd.DataFrame:
+	"""Load prompt metadata for prompt administration.
+
+	Purpose:
+		Reads prompt metadata from the configured SQLite Prompts table, orders rows by most
+		recent identifier first, and inserts a selection flag used by the Prompt Engineering
+		data editor.
+
+	Returns:
+		pd.DataFrame: Return value produced by the operation.
+	"""
+	with sqlite3.connect( cfg.DB_PATH ) as conn:
+		df = pd.read_sql_query(
+			"SELECT ID, Caption, Name, Category, Text FROM Prompts ORDER BY ID DESC",
+			conn )
+	df.insert( 0, "Selected", False )
+	return df
+
+def fetch_prompt_by_id( pid: int ) -> Dict[ str, Any ] | None:
+	"""Load a prompt record by primary key.
+
+	Purpose:
+		Retrieves the full prompt record for a selected ID value and returns a
+		dictionary keyed by SQLite column names for prompt-editing workflows.
+
+	Args:
+		pid: Prompt primary key value.
+
+	Returns:
+		dict[str, Any] | None: Return value produced by the operation.
+	"""
+	with sqlite3.connect( cfg.DB_PATH ) as conn:
+		cur = conn.execute(
+			"SELECT ID, Caption, Name, Category, Text FROM Prompts WHERE ID=?",
+			(pid,)
+		)
+		row = cur.fetchone( )
+		return dict( zip( [ c[ 0 ] for c in cur.description ], row ) ) if row else None
+
+def fetch_prompt_by_name( name: str ) -> Dict[ str, Any ] | None:
+	"""Load a prompt record by caption.
+
+	Purpose:
+		Retrieves the full prompt record for a selected prompt caption and returns a
+		dictionary keyed by SQLite column names for template-loading workflows.
+
+	Args:
+		name: Prompt caption or object name used by the operation.
+
+	Returns:
+		dict[str, Any] | None: Return value produced by the operation.
+	"""
+	with sqlite3.connect( cfg.DB_PATH ) as conn:
+		cur = conn.execute(
+			"SELECT ID, Caption, Name, Category, Text FROM Prompts WHERE Caption=? ORDER BY ID",
+			(name,)
+		)
+		row = cur.fetchone( )
+		return dict( zip( [ c[ 0 ] for c in cur.description ], row ) ) if row else None
+
+def insert_prompt( data: Dict[ str, Any ] ) -> None:
+	"""Insert a prompt record.
+
+	Purpose:
+		Writes a new prompt-template record to the configured SQLite Prompts table using the
+		fields collected by the Prompt Engineering UI.
+
+	Args:
+		data: Prompt field dictionary.
+	"""
+	with sqlite3.connect( cfg.DB_PATH ) as conn:
+		conn.execute(
+			'INSERT INTO Prompts (Caption, Name, Category, Text) VALUES (?, ?, ?, ?)',
+			(data[ 'Caption' ], data[ 'Name' ], data[ 'Category' ], data[ 'Text' ]) )
+
+def update_prompt( pid: int, data: Dict[ str, Any ] ) -> None:
+	"""Update an existing prompt record.
+
+	Purpose:
+		Updates an existing prompt-template record in the configured SQLite Prompts table
+		using the selected ID value and edited field values.
+
+	Args:
+		pid: Prompt primary key value.
+		data: Prompt field dictionary.
+	"""
+	with sqlite3.connect( cfg.DB_PATH ) as conn:
+		conn.execute(
+			"UPDATE Prompts SET Caption=?, Name=?, Category=?, Text=? WHERE ID=?",
+			(data[ 'Caption' ], data[ 'Name' ], data[ 'Category' ], data[ 'Text' ], pid)
+		)
+
+def delete_prompt( pid: int ) -> None:
+	"""Delete a prompt record.
+
+	Purpose:
+		Removes a prompt-template record from the configured SQLite Prompts table using the
+		selected ID value.
+
+	Args:
+		pid: Prompt primary key value.
+	"""
+	with sqlite3.connect( cfg.DB_PATH ) as conn:
+		conn.execute( "DELETE FROM Prompts WHERE ID=?", (pid,) )
+
+def clear_active_prompt_metadata( ) -> None:
+	"""Clear metadata for the active system-instruction template.
+
+	Purpose:
+		Resets the shared prompt identity fields without changing conversation, document,
+		retrieval, or inference state.
+
+	Returns:
+		None: This function performs its work through side effects and does not return a value.
+	"""
+	st.session_state[ 'active_prompt_id' ] = None
+	st.session_state[ 'active_prompt_caption' ] = ''
+	st.session_state[ 'active_prompt_name' ] = ''
+	st.session_state[ 'active_prompt_category' ] = ''
+
+def render_system_instructions( category_key: str, prompt_key: str, clear_key: str ) -> None:
+	"""Render a categorized System Instructions expander.
+
+	Purpose:
+		Displays the shared editable system text with mode-specific category and ID-backed
+		template selectors. The selector exposes only categories supported by Leeroy's local
+		text model while keeping selection state independent between application modes.
+
+	Args:
+		category_key: Session-state key for the mode-specific category selector.
+		prompt_key: Session-state key for the mode-specific prompt selector.
+		clear_key: Widget key for the mode-specific clear button.
+
+	Returns:
+		None: This function performs its work through side effects and does not return a value.
+	"""
+	categories = fetch_prompt_categories( cfg.DB_PATH )
+	selected_category = st.session_state.get( category_key )
+	if selected_category not in categories:
+		st.session_state[ category_key ] = None
+		selected_category = None
+
+	prompt_choices = fetch_prompt_choices( cfg.DB_PATH, str( selected_category or '' ) )
+	prompt_labels = { prompt_id: label for prompt_id, label in prompt_choices }
+	prompt_ids = list( prompt_labels.keys( ) )
+	if st.session_state.get( prompt_key ) not in prompt_ids:
+		st.session_state[ prompt_key ] = None
+
+	def on_category_change( ) -> None:
+		st.session_state[ prompt_key ] = None
+		clear_active_prompt_metadata( )
+
+	def on_template_change( ) -> None:
+		prompt_id = st.session_state.get( prompt_key )
+		if prompt_id is None:
+			clear_active_prompt_metadata( )
+			return None
+
+		prompt_record = fetch_prompt_by_id( int( prompt_id ) )
+		if prompt_record is None:
+			clear_active_prompt_metadata( )
+			return None
+
+		st.session_state[ 'system_instructions' ] = str( prompt_record.get( 'Text' ) or '' )
+		st.session_state[ 'active_prompt_id' ] = int( prompt_record[ 'ID' ] )
+		st.session_state[ 'active_prompt_caption' ] = str(
+			prompt_record.get( 'Caption' ) or '' )
+		st.session_state[ 'active_prompt_name' ] = str( prompt_record.get( 'Name' ) or '' )
+		st.session_state[ 'active_prompt_category' ] = str(
+			prompt_record.get( 'Category' ) or '' )
+
+	def on_clear( ) -> None:
+		st.session_state[ 'system_instructions' ] = ''
+		st.session_state[ category_key ] = None
+		st.session_state[ prompt_key ] = None
+		clear_active_prompt_metadata( )
+
+	with st.expander( label='System Instructions', icon='🖥️', expanded=False, width='stretch' ):
+		ins_left, ins_right = st.columns( [ 0.8, 0.2 ] )
+
+		with ins_left:
+			st.text_area( label='Enter Text', height=50, width='stretch',
+				help=cfg.SYSTEM_INSTRUCTIONS, key='system_instructions' )
+
+		with ins_right:
+			st.selectbox( label='Category', options=categories, index=None, key=category_key,
+				on_change=on_category_change, placeholder='Select category' )
+			st.selectbox( label='Use Template', options=prompt_ids, index=None, key=prompt_key,
+				format_func=lambda prompt_id: prompt_labels.get( prompt_id, str( prompt_id ) ),
+				on_change=on_template_change, disabled=selected_category is None,
+				placeholder='Select template' )
+
+		st.button( label='Clear Instructions', width='stretch', key=clear_key,
+			on_click=on_clear )
+
+def retrieve_session_semantic( query: str, limit: int = 4 ) -> List[ Tuple[ str, str, float ] ]:
+	"""Search only current-session vectors generated by the configured Foundry model."""
+	if st.session_state.get( 'semantic_model_id' ) != cfg.FOUNDRY_EMBEDDING_MODEL:
+		return [ ]
+	rows = st.session_state.get( 'semantic_session_rows', [ ] )
+	if not rows:
+		return [ ]
+	q = load_embedder( ).encode( [query] )[0]
+	scored = [ ]
+	for chunk, blob in rows:
+		v = np.frombuffer( blob, dtype=np.float32 )
+		if q.shape != v.shape:
+			raise ValueError( 'Semantic index dimensions do not match the query.' )
+		scored.append( ('Session', chunk, cosine_sim( q, v )) )
+	return sorted( scored, key=lambda r: r[2], reverse=True )[ :limit ]
+
+def build_prompt( user_input: str ) -> str:
+	"""Build a llama.cpp-compatible chat prompt.
+
+	Purpose:
+		Combines system instructions, optional semantic retrieval context, basic document
+		context, and in-memory chat history into the chat-template prompt consumed by the
+		local llama.cpp model.
+
+	Args:
+		user_input: User message or constructed prompt text for the current generation turn.
+
+	Returns:
+		str: Return value produced by the operation.
+	"""
+	system_instructions = st.session_state.get( 'system_instructions', '' )
+	use_semantic = bool( st.session_state.get( 'use_semantic', False ) )
+	basic_docs = st.session_state.get( 'basic_docs', [ ] )
+	messages = st.session_state.get( 'messages', [ ] )
+	
+	top_k_value = int( st.session_state.get( 'top_k', 0 ) )
+	if top_k_value <= 0:
+		top_k_value = 4
+	
+	prompt = f"<|system|>\n{system_instructions}\n</s>\n"
+	
+	if use_semantic:
+		for _, chunk, _ in retrieve_session_semantic( user_input, top_k_value ):
+			prompt += f"<|system|>\n{chunk}\n</s>\n"
+
+	for d in basic_docs[ :6 ]:
+		prompt += f"<|system|>\n{d}\n</s>\n"
+	
+	if isinstance( messages, list ):
+		for msg in messages:
+			role = ''
+			content = ''
+			
+			if isinstance( msg, tuple ) or isinstance( msg, list ):
+				if len( msg ) == 2:
+					role = str( msg[ 0 ] or '' ).strip( )
+					content = str( msg[ 1 ] or '' )
+			elif isinstance( msg, dict ):
+				role = str( msg.get( 'role', '' ) or '' ).strip( )
+				content = str( msg.get( 'content', '' ) or '' )
+			
+			if role:
+				prompt += f"<|{role}|>\n{content}\n</s>\n"
+	
+	prompt += f"<|user|>\n{user_input}\n</s>\n<|assistant|>\n"
+	return prompt
+
+def run_foundry_turn( user_input: str, max_tokens: int, output: Any | None = None ) -> str:
+	"""Invoke an imported Foundry generic-chat-completion model.
+
+	The documented generic API is non-streaming. The result is rendered once,
+	without pretending tokens arrive incrementally. Backend-specific local
+	llama.cpp sampling controls are intentionally not passed to this API.
+	"""
+	model_name = cfg.FOUNDRY_CHAT_MODEL
+	if not model_name:
+		raise RuntimeError( 'Set LEEROY_FOUNDRY_CHAT_MODEL to the imported Foundry chat model alias/RID.' )
+	from language_model_service_api.languagemodelservice_api_completion_v3 import (
+		DialogChatMessage, DialogRole, GenericChatCompletionRequest,
+	)
+	from palantir_models.models import GenericChatCompletionLanguageModel
+	model = GenericChatCompletionLanguageModel.get( model_name )
+	history = st.session_state.get( 'messages', [ ] )
+	turns = [ ]
+	for message in history:
+		if isinstance( message, (tuple, list) ) and len( message ) == 2:
+			role, content = message
+		elif isinstance( message, dict ):
+			role, content = message.get( 'role' ), message.get( 'content' )
+		else:
+			continue
+		role = str( role or '' ).lower( )
+		if role in ('user', 'assistant') and content:
+			turns.append( (role, str( content )) )
+	# Streamlit appends the current user message before calling generation.
+	# Remove an exact final duplicate and add the actual retrieval-grounded input.
+	if turns and turns[-1][0] == 'user':
+		turns.pop( )
+	turns.append( ('user', str( user_input )) )
+	# Merge consecutive roles and discard an unmatched leading assistant turn.
+	conversation = [ ]
+	for role, content in turns:
+		if not conversation and role == 'assistant':
+			continue
+		if conversation and conversation[-1][0] == role:
+			conversation[-1] = (role, conversation[-1][1] + '\n\n' + content)
+		else:
+			conversation.append( (role, content) )
+	system = str( st.session_state.get( 'system_instructions', '' ) or '' ).strip( )
+	messages = [ ]
+	if system:
+		messages.append( DialogChatMessage( role=DialogRole.SYSTEM, content=system ) )
+	for role, content in conversation:
+		messages.append( DialogChatMessage(
+			role=DialogRole.USER if role == 'user' else DialogRole.ASSISTANT,
+			content=content ) )
+	if not messages:
+		raise ValueError( 'Chat request has no messages.' )
+	args = { 'messages': messages }
+	if max_tokens > 0:
+		args['max_tokens'] = int( max_tokens )
+	response = model.create_chat_completion( GenericChatCompletionRequest( **args ) )
+	text = str( response.completion or '' ).strip( )
+	if output is not None:
+		output.markdown( text )
+	return text
+
+def run_llm_turn( user_input: str, temperature: float, top_p: float, repeat_penalty: float,
+		max_tokens: int, stream: bool, output: Any | None = None ) -> str:
+	"""Run one local LLM generation turn.
+
+	Purpose:
+		Builds the shared prompt, loads the optional local llama.cpp model, and either streams
+		generated tokens into a Streamlit placeholder or returns the completed response text
+		for downstream workflows.
+
+	Args:
+		user_input: User message or constructed prompt text for the current generation turn.
+		temperature: Sampling temperature passed to the local model.
+		top_p: Nucleus sampling probability passed to the local model.
+		repeat_penalty: Repeat penalty passed to the local model.
+		max_tokens: Maximum number of generated tokens.
+		stream: Whether to stream generated text into the UI.
+		output: Optional Streamlit placeholder used for streaming output.
+
+	Returns:
+		str: Return value produced by the operation.
+	"""
+	if cfg.INFERENCE_BACKEND == 'foundry':
+		return run_foundry_turn( user_input, max_tokens, output )
+	if cfg.INFERENCE_BACKEND != 'local':
+		raise ValueError( f'Unsupported inference backend: {cfg.INFERENCE_BACKEND}' )
+
+	if user_input is None:
+		return ''
+	
+	prompt = build_prompt( user_input )
+	local_model = get_llm( int( st.session_state.get( 'context_window', cfg.DEFAULT_CTX ) ),
+		int( st.session_state.get( 'cpu_threads', cfg.CORES ) ) )
+	
+	if local_model is None:
+		st.error( 'Local llama.cpp model is unavailable in this environment.' )
+		return ''
+	
+	if not stream:
+		resp = local_model(
+			prompt,
+			stream=False,
+			max_tokens=max_tokens,
+			temperature=temperature,
+			top_p=top_p,
+			repeat_penalty=repeat_penalty,
+			stop=[ '</s>' ]
+		)
+		text = (resp.get( 'choices', [ { 'text': '' } ] )[ 0 ].get( 'text', '' ) or '')
+		return text.strip( )
+	
+	buf = ''
+	if output is None:
+		output = st.empty( )
+	
+	for chunk in local_model(
+			prompt,
+			stream=True,
+			max_tokens=max_tokens,
+			temperature=temperature,
+			top_p=top_p,
+			repeat_penalty=repeat_penalty,
+			stop=[ '</s>' ]
+	):
+		buf += chunk[ 'choices' ][ 0 ][ 'text' ]
+		output.markdown( buf + '▌' )
+	
+	output.markdown( buf )
+	return buf.strip( )
+
+# ----------- DATABASE UTILITIES -------------------------
+
+def create_connection( ) -> sqlite3.Connection:
+	"""Create a SQLite connection.
+
+	Purpose:
+		Opens a connection to the configured application database used by chat history, prompt
+		records, semantic embeddings, and data-management tables.
+
+	Returns:
+		sqlite3.Connection: Return value produced by the operation.
+	"""
+	return sqlite3.connect( cfg.DB_PATH )
+
+def list_tables( ) -> List[ str ]:
+	"""List user-visible SQLite tables.
+
+	Purpose:
+		Reads table names from sqlite_master and returns them in sorted order for data-
+		management browsing, administration, and query workflows.
+
+	Returns:
+		list[str]: Return value produced by the operation.
+	"""
+	with create_connection( ) as conn:
+		_query = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
+		rows = conn.execute( _query ).fetchall( )
+		return [ r[ 0 ] for r in rows ]
+
+def create_schema( table: str ) -> List[ Tuple ]:
+	"""Read a SQLite table schema.
+
+	Purpose:
+		Retrieves PRAGMA table_info metadata for the selected table so data-management views
+		can display columns, types, nullability, defaults, and primary-key indicators.
+
+	Args:
+		table: SQLite table name.
+
+	Returns:
+		list[tuple]: Return value produced by the operation.
+	"""
+	with create_connection( ) as conn:
+		return conn.execute( f'PRAGMA table_info("{table}");' ).fetchall( )
+
+def read_table( table: str, limit: int = None, offset: int = 0 ) -> pd.DataFrame:
+	"""Read rows from a SQLite table.
+
+	Purpose:
+		Builds a SELECT query for the requested table and optional pagination arguments, then
+		returns the result as a pandas DataFrame for browsing and analysis.
+
+	Args:
+		table: SQLite table name.
+		limit: Optional maximum number of rows to return.
+		offset: Number of rows to skip before returning results.
+
+	Returns:
+		pd.DataFrame: Return value produced by the operation.
+	"""
+	query = f'SELECT rowid, * FROM "{table}"'
+	if limit:
+		query += f" LIMIT {limit} OFFSET {offset}"
+	with create_connection( ) as conn:
+		return pd.read_sql_query( query, conn )
+
+def drop_table( table: str ) -> None:
+	"""Drop a SQLite table when requested.
+
+	Purpose:
+		Removes a selected table from the application database when the data-management
+		administrator explicitly requests deletion.
+
+	Args:
+		table: SQLite table name.
+
+	Raises:
+		ValueError: Raised when the requested table name is empty.
+	"""
+	if not table:
+		return
+	
+	with create_connection( ) as conn:
+		conn.execute( f'DROP TABLE IF EXISTS "{table}";' )
+		conn.commit( )
+
+def rename_table( old_name: str, new_name: str ) -> None:
+	"""Rename an existing SQLite table.
+
+	Purpose:
+		Attempts a native SQLite ALTER TABLE rename and falls back to a schema-preserving
+		rebuild when needed. The fallback preserves column data and index SQL where possible.
+
+	Args:
+		old_name: Existing table or column name.
+		new_name: Replacement table or column name.
+
+	Raises:
+		ValueError: Raised when the source table definition is missing or malformed.
+	"""
+	if not old_name or not new_name:
+		return
+	
+	with create_connection( ) as conn:
+		try:
+			conn.execute( f'ALTER TABLE "{old_name}" RENAME TO "{new_name}";' )
+			conn.commit( )
+			return
+		except Exception:
+			pass
+		
+		row = conn.execute(
+			"""
+            SELECT sql
+            FROM sqlite_master
+            WHERE type ='table' AND name =?
+			""",
+			(old_name,)
+		).fetchone( )
+		
+		if not row or not row[ 0 ]:
+			raise ValueError( "Table definition not found." )
+		
+		create_sql = row[ 0 ]
+		
+		indexes = conn.execute(
+			"""
+            SELECT sql
+            FROM sqlite_master
+            WHERE type ='index' AND tbl_name=? AND sql IS NOT NULL
+			""",
+			(old_name,)
+		).fetchall( )
+		
+		open_paren = create_sql.find( "(" )
+		if open_paren == -1:
+			raise ValueError( "Malformed CREATE TABLE statement." )
+		
+		temp_name = f"{new_name}__rebuild_temp"
+		
+		conn.execute( "BEGIN" )
+		conn.execute( f'CREATE TABLE "{temp_name}" {create_sql[ open_paren: ]}' )
+		
+		cols = [ r[ 1 ] for r in conn.execute( f'PRAGMA table_info("{old_name}");' ).fetchall( ) ]
+		col_list = ", ".join( [ f'"{c}"' for c in cols ] )
+		
+		conn.execute(
+			f'INSERT INTO "{temp_name}" ({col_list}) SELECT {col_list} FROM "{old_name}";'
+		)
+		
+		conn.execute( f'DROP TABLE "{old_name}";' )
+		conn.execute( f'ALTER TABLE "{temp_name}" RENAME TO "{new_name}";' )
+		
+		for idx in indexes:
+			idx_sql = idx[ 0 ]
+			if idx_sql:
+				idx_sql = idx_sql.replace( f'ON "{old_name}"', f'ON "{new_name}"' )
+				conn.execute( idx_sql )
+		
+		conn.commit( )
+
+def rename_column( table_name: str, old_name: str, new_name: str ) -> None:
+	"""Rename a column within a SQLite table.
+
+	Purpose:
+		Attempts a native SQLite column rename and falls back to a schema-preserving table
+		rebuild that keeps column order, data, defaults, nullability, and index SQL where
+		possible.
+
+	Args:
+		table_name: SQLite table name.
+		old_name: Existing table or column name.
+		new_name: Replacement table or column name.
+
+	Raises:
+		ValueError: Raised when the table definition is missing or the selected column does not exist.
+	"""
+	if not table_name or not old_name or not new_name:
+		return
+	
+	with create_connection( ) as conn:
+		try:
+			conn.execute(
+				f'ALTER TABLE "{table_name}" RENAME COLUMN "{old_name}" TO "{new_name}";'
+			)
+			conn.commit( )
+			return
+		except Exception:
+			pass
+		
+		row = conn.execute(
+			"""
+            SELECT sql
+            FROM sqlite_master
+            WHERE type ='table' AND name =?
+			""",
+			(table_name,)
+		).fetchone( )
+		
+		if not row or not row[ 0 ]:
+			raise ValueError( "Table definition not found." )
+		
+		create_sql = row[ 0 ]
+		
+		indexes = conn.execute(
+			"""
+            SELECT sql
+            FROM sqlite_master
+            WHERE type ='index' AND tbl_name=? AND sql IS NOT NULL
+			""",
+			(table_name,)
+		).fetchall( )
+		
+		schema = conn.execute( f'PRAGMA table_info("{table_name}");' ).fetchall( )
+		cols = [ r[ 1 ] for r in schema ]
+		if old_name not in cols:
+			raise ValueError( "Column not found." )
+		
+		mapped_cols = [ (new_name if c == old_name else c) for c in cols ]
+		
+		temp_table = f"{table_name}__rebuild_temp"
+		
+		col_defs: List[ str ] = [ ]
+		pk_cols = [ r for r in schema if int( r[ 5 ] or 0 ) > 0 ]
+		single_pk = len( pk_cols ) == 1
+		
+		for row in schema:
+			col_name = row[ 1 ]
+			col_type = row[ 2 ] or ''
+			not_null = int( row[ 3 ] or 0 )
+			default_value = row[ 4 ]
+			pk = int( row[ 5 ] or 0 )
+			
+			out_name = new_name if col_name == old_name else col_name
+			col_def = f'"{out_name}" {col_type}'.strip( )
+			
+			if not_null:
+				col_def += ' NOT NULL'
+			
+			if default_value is not None:
+				col_def += f' DEFAULT {default_value}'
+			
+			if single_pk and pk == 1:
+				col_def += ' PRIMARY KEY'
+			
+			col_defs.append( col_def )
+		
+		new_create_sql = f'CREATE TABLE "{temp_table}" ({", ".join( col_defs )});'
+		
+		old_select = ", ".join( [ f'"{c}"' for c in cols ] )
+		new_insert = ", ".join( [ f'"{c}"' for c in mapped_cols ] )
+		
+		conn.execute( "BEGIN" )
+		conn.execute( new_create_sql )
+		conn.execute(
+			f'INSERT INTO "{temp_table}" ({new_insert}) SELECT {old_select} FROM "{table_name}";'
+		)
+		
+		conn.execute( f'DROP TABLE "{table_name}";' )
+		conn.execute( f'ALTER TABLE "{temp_table}" RENAME TO "{table_name}";' )
+		
+		for idx in indexes:
+			idx_sql = idx[ 0 ]
+			if idx_sql:
+				idx_sql = idx_sql.replace( f'"{old_name}"', f'"{new_name}"' )
+				conn.execute( idx_sql )
+		
+		conn.commit( )
+
+def create_index( table: str, column: str ) -> None:
+	"""Create a safe SQLite index.
+
+	Purpose:
+		Validates the requested table and column against the active database schema, creates a
+		sanitized index name, and creates the index using quoted identifiers.
+
+	Args:
+		table: SQLite table name.
+		column: SQLite column name.
+
+	Raises:
+		ValueError: Raised when the table or column is not present in the active schema.
+	"""
+	if not table or not column:
+		return
+	
+	# ----------  Validate table exists
+	tables = list_tables( )
+	if table not in tables:
+		raise ValueError( "Invalid table name." )
+	
+	# ----------  Validate column exists
+	schema = create_schema( table )
+	valid_columns = [ col[ 1 ] for col in schema ]
+	
+	if column not in valid_columns:
+		raise ValueError( "Invalid column name." )
+	
+	# ----------  Sanitize index name (identifier only)
+	safe_index_name = re.sub( r"[^0-9a-zA-Z_]+", "_", f"idx_{table}_{column}" )
+	
+	# ----------  Create index safely (quote identifiers)
+	sql = f'CREATE INDEX IF NOT EXISTS "{safe_index_name}" ON "{table}"("{column}");'
+	
+	with create_connection( ) as conn:
+		conn.execute( sql )
+		conn.commit( )
+
+def apply_filters( df: pd.DataFrame ) -> pd.DataFrame:
+	"""Apply an interactive DataFrame filter.
+
+	Purpose:
+		Renders Streamlit filter controls and applies the selected comparison or containment
+		operation to the provided DataFrame for data-management exploration.
+
+	Args:
+		df: DataFrame used by the operation.
+
+	Returns:
+		pd.DataFrame: Return value produced by the operation.
+	"""
+	st.subheader( 'Advanced Filters' )
+	col1, col2, col3 = st.columns( 3 )
+	column = col1.selectbox( 'Column', df.columns )
+	operator = col2.selectbox( 'Operator', [ '=', '!=', '>', '<', '>=', '<=', 'contains' ] )
+	value = col3.text_input( 'Value' )
+	if value:
+		if operator == '=':
+			df = df[ df[ column ] == value ]
+		elif operator == '!=':
+			df = df[ df[ column ] != value ]
+		elif operator == '>':
+			df = df[ df[ column ].astype( float ) > float( value ) ]
+		elif operator == '<':
+			df = df[ df[ column ].astype( float ) < float( value ) ]
+		elif operator == '>=':
+			df = df[ df[ column ].astype( float ) >= float( value ) ]
+		elif operator == '<=':
+			df = df[ df[ column ].astype( float ) <= float( value ) ]
+		elif operator == 'contains':
+			df = df[ df[ column ].astype( str ).str.contains( value ) ]
+	
+	return df
+
+def create_aggregation( df: pd.DataFrame ) -> None:
+	"""Render an interactive aggregation result.
+
+	Purpose:
+		Renders Streamlit controls for selecting a numeric column and aggregation function,
+		computes the selected aggregate, and displays the result as a metric.
+
+	Args:
+		df: DataFrame used by the operation.
+	"""
+	st.subheader( 'Aggregation Engine' )
+	
+	numeric_cols = df.select_dtypes( include=[ 'number' ] ).columns.tolist( )
+	
+	if not numeric_cols:
+		st.info( 'No numeric columns available.' )
+		return
+	
+	col = st.selectbox( 'Column', numeric_cols )
+	agg = st.selectbox( 'Aggregation', [ 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'MEDIAN' ] )
+	
+	if agg == 'COUNT':
+		result = df[ col ].count( )
+	elif agg == 'SUM':
+		result = df[ col ].sum( )
+	elif agg == 'AVG':
+		result = df[ col ].mean( )
+	elif agg == 'MIN':
+		result = df[ col ].min( )
+	elif agg == 'MAX':
+		result = df[ col ].max( )
+	elif agg == 'MEDIAN':
+		result = df[ col ].median( )
+	
+	st.metric( 'Result', result )
+
+def create_visualization( df: pd.DataFrame ) -> None:
+	"""Render an interactive DataFrame visualization.
+
+	Purpose:
+		Renders Streamlit chart controls and uses Plotly Express to display histograms, bars,
+		lines, scatter plots, boxes, pies, or correlation heatmaps from the provided
+		DataFrame.
+
+	Args:
+		df: DataFrame used by the operation.
+	"""
+	st.subheader( 'Visualization Engine' )
+	numeric_cols = df.select_dtypes( include=[ 'number' ] ).columns.tolist( )
+	categorical_cols = df.select_dtypes( include=[ 'object' ] ).columns.tolist( )
+	chart = st.selectbox( 'Chart Type',
+		[ 'Histogram', 'Bar', 'Line', 'Scatter', 'Box', 'Pie', 'Correlation' ] )
+	
+	if chart == 'Histogram' and numeric_cols:
+		col = st.selectbox( 'Column', numeric_cols )
+		fig = px.histogram( df, x=col )
+		st.plotly_chart( fig, use_container_width=True )
+	
+	elif chart == 'Bar':
+		x = st.selectbox( 'X', df.columns )
+		y = st.selectbox( 'Y', numeric_cols )
+		fig = px.bar( df, x=x, y=y )
+		st.plotly_chart( fig, use_container_width=True )
+	
+	elif chart == 'Line':
+		x = st.selectbox( 'X', df.columns )
+		y = st.selectbox( 'Y', numeric_cols )
+		fig = px.line( df, x=x, y=y )
+		st.plotly_chart( fig, use_container_width=True )
+	
+	elif chart == 'Scatter':
+		x = st.selectbox( 'X', numeric_cols )
+		y = st.selectbox( 'Y', numeric_cols )
+		fig = px.scatter( df, x=x, y=y )
+		st.plotly_chart( fig, use_container_width=True )
+	
+	elif chart == 'Box':
+		col = st.selectbox( 'Column', numeric_cols )
+		fig = px.box( df, y=col )
+		st.plotly_chart( fig, use_container_width=True )
+	
+	elif chart == 'Pie':
+		col = st.selectbox( 'Category Column', categorical_cols )
+		fig = px.pie( df, names=col )
+		st.plotly_chart( fig, use_container_width=True )
+	
+	elif chart == 'Correlation' and len( numeric_cols ) > 1:
+		corr = df[ numeric_cols ].corr( )
+		fig = px.imshow( corr, text_auto=True )
+		st.plotly_chart( fig, use_container_width=True )
+
+def convert_dataframe( table_name: str, df: pd.DataFrame ) -> None:
+	"""Create a SQLite table from DataFrame columns.
+
+	Purpose:
+		Maps pandas column dtypes to SQLite storage types and creates a table definition using
+		normalized column names for imported tabular data.
+
+	Args:
+		table_name: SQLite table name.
+		df: DataFrame used by the operation.
+	"""
+	columns = [ ]
+	for col in df.columns:
+		sql_type = get_sqlite_type( df[ col ].dtype )
+		safe_col = col.replace( ' ', '_' )
+		columns.append( f'{safe_col} {sql_type}' )
+	
+	create_stmt = f'CREATE TABLE IF NOT EXISTS {table_name} ({", ".join( columns )});'
+	
+	with create_connection( ) as conn:
+		conn.execute( create_stmt )
+		conn.commit( )
+
+def insert_data( table_name: str, df: pd.DataFrame ) -> None:
+	"""Insert DataFrame rows into SQLite.
+
+	Purpose:
+		Normalizes DataFrame column names to SQLite-friendly identifiers and bulk-inserts row
+		values into the specified table.
+
+	Args:
+		table_name: SQLite table name.
+		df: DataFrame used by the operation.
+	"""
+	df = df.copy( )
+	df.columns = [ c.replace( ' ', '_' ) for c in df.columns ]
+	
+	placeholders = ', '.join( [ '?' ] * len( df.columns ) )
+	stmt = f'INSERT INTO {table_name} VALUES ({placeholders});'
+	
+	with create_connection( ) as conn:
+		conn.executemany( stmt, df.values.tolist( ) )
+		conn.commit( )
+
+def get_sqlite_type( dtype: object ) -> str:
+	"""Map a pandas dtype to a SQLite type.
+
+	Purpose:
+		Converts pandas dtype information into the SQLite storage class used by import and
+		table-creation workflows.
+
+	Args:
+		dtype: Pandas dtype or dtype-like object.
+
+	Returns:
+		str: Return value produced by the operation.
+	"""
+	dtype_str = str( dtype ).lower( )
+	
+	# ----------  Integer Types
+	if "int" in dtype_str:
+		return "INTEGER"
+	
+	# ----------  Float Types
+	if "float" in dtype_str:
+		return "REAL"
+	
+	# ----------  Boolean
+	if "bool" in dtype_str:
+		return "INTEGER"
+	
+	# ----------  Datetime
+	if "datetime" in dtype_str:
+		return "TEXT"
+	
+	# ----------  Categorical
+	if "category" in dtype_str:
+		return "TEXT"
+	
+	# ----------  Default fallback
+	return "TEXT"
+
+def create_custom_table( table_name: str, columns: list ) -> None:
+	"""Create a custom SQLite table.
+
+	Purpose:
+		Validates table and column identifiers, translates user-provided column definitions
+		into SQLite DDL, and creates the requested table when it does not exist.
+
+	Args:
+		table_name: SQLite table name.
+		columns: Column-definition dictionaries used to create the table.
+
+	Raises:
+		ValueError: Raised when table or column definitions are invalid.
+	"""
+	if not table_name:
+		raise ValueError( "Table name required." )
+	
+	# ----------  Validate identifier
+	if not re.match( r"^[A-Za-z_][A-Za-z0-9_]*$", table_name ):
+		raise ValueError( "Invalid table name." )
+	
+	col_defs = [ ]
+	for col in columns:
+		col_name = col[ "name" ]
+		col_type = col[ "type" ].upper( )
+		if not re.match( r"^[A-Za-z_][A-Za-z0-9_]*$", col_name ):
+			raise ValueError( f"Invalid column name: {col_name}" )
+		
+		definition = f'"{col_name}" {col_type}'
+		if col[ "primary_key" ]:
+			definition += " PRIMARY KEY"
+			if col[ "auto_increment" ] and col_type == "INTEGER":
+				definition += " AUTOINCREMENT"
+		
+		if col[ "not_null" ]:
+			definition += " NOT NULL"
+		
+		col_defs.append( definition )
+	
+	sql = f'CREATE TABLE IF NOT EXISTS "{table_name}" ({", ".join( col_defs )});'
+	with create_connection( ) as conn:
+		conn.execute( sql )
+		conn.commit( )
+
+def is_safe_query( query: str ) -> bool:
+	"""Validate whether a SQL query is read-only.
+
+	Purpose:
+		Checks query text before execution in the SQL console, allowing read-oriented
+		statements and blocking destructive or mutating operations and multiple statements.
+
+	Args:
+		query: SQL or search query text.
+
+	Returns:
+		bool: Return value produced by the operation.
+	"""
+	if not query or not isinstance( query, str ):
+		return False
+	
+	q = query.strip( ).lower( )
+	
+	# ----------  Block multiple statements
+	if ';' in q[ :-1 ]:
+		return False
+	
+	# ----------  Remove SQL comments
+	q = re.sub( r"--.*?$", "", q, flags=re.MULTILINE )
+	q = re.sub( r"/\*.*?\*/", "", q, flags=re.DOTALL )
+	q = q.strip( )
+	
+	# ----------  Allowed starting keywords
+	allowed_starts = ('select', 'with', 'explain', 'pragma')
+	if not q.startswith( allowed_starts ):
+		return False
+	
+	# ----------  Block dangerous keywords anywhere
+	blocked_keywords = ('insert ', 'update ', 'delete ', 'drop ', 'alter ',
+	                    'create ', 'attach ', 'detach ', 'vacuum ', 'replace ', 'trigger ')
+	
+	for keyword in blocked_keywords:
+		if keyword in q:
+			return False
+	
+	return True
+
+def create_identifier( name: str ) -> str:
+	"""Create a safe SQLite identifier.
+
+	Purpose:
+		Normalizes arbitrary text into a SQLite-safe identifier by replacing invalid
+		characters, ensuring a valid leading character, and rejecting empty results.
+
+	Args:
+		name: Prompt caption or object name used by the operation.
+
+	Returns:
+		str: Return value produced by the operation.
+
+	Raises:
+		ValueError: Raised when the input cannot be converted into a valid identifier.
+	"""
+	if not name or not isinstance( name, str ):
+		raise ValueError( 'Invalid Identifier.' )
+	
+	safe = re.sub( r'[^0-9a-zA-Z_]', '_', name.strip( ) )
+	if not re.match( r'^[A-Za-z_]', safe ):
+		safe = f'_{safe}'
+	
+	if not safe:
+		raise ValueError( 'Invalid identifier after sanitization.' )
+	
+	return safe
+
+def get_indexes( table: str ) -> List[ Tuple ]:
+	"""List indexes for a SQLite table.
+
+	Purpose:
+		Reads PRAGMA index_list metadata for the selected table so the data-management
+		administration UI can display available indexes.
+
+	Args:
+		table: SQLite table name.
+
+	Returns:
+		list[tuple]: Return value produced by the operation.
+	"""
+	with create_connection( ) as conn:
+		rows = conn.execute( f'PRAGMA index_list("{table}");' ).fetchall( )
+		return rows
+
+def add_column( table: str, column: str, col_type: str ) -> None:
+	"""Add a column to a SQLite table.
+
+	Purpose:
+		Sanitizes the requested column name and executes an ALTER TABLE statement that appends
+		the column with the requested SQLite type.
+
+	Args:
+		table: SQLite table name.
+		column: SQLite column name.
+		col_type: SQLite column type.
+	"""
+	column = create_identifier( column )
+	col_type = col_type.upper( )
+	
+	with create_connection( ) as conn:
+		conn.execute(
+			f'ALTER TABLE "{table}" ADD COLUMN "{column}" {col_type};' )
+		conn.commit( )
+
+def create_profile_table( table: str ) -> pd.DataFrame:
+	"""Create a profile summary for a SQLite table.
+
+	Purpose:
+		Reads the selected table into a DataFrame and computes per-column type, null
+		percentage, distinct percentage, and numeric summary statistics for exploration.
+
+	Args:
+		table: SQLite table name.
+
+	Returns:
+		pd.DataFrame: Return value produced by the operation.
+	"""
+	df = read_table( table )
+	profile_rows = [ ]
+	total_rows = len( df )
+	for col in df.columns:
+		series = df[ col ]
+		null_count = series.isna( ).sum( )
+		distinct_count = series.nunique( dropna=True )
+		row = \
+			{
+					'column': col, 'dtype': str( series.dtype ),
+					'null_%': round( (null_count / total_rows) * 100, 2 ) if total_rows else 0,
+					'distinct_%': round( (
+							                     distinct_count / total_rows) * 100,
+						2 ) if total_rows else 0,
+			}
+		
+		if pd.api.types.is_numeric_dtype( series ):
+			row[ "min" ] = series.min( )
+			row[ "max" ] = series.max( )
+			row[ "mean" ] = series.mean( )
+		else:
+			row[ "min" ] = None
+			row[ "max" ] = None
+			row[ "mean" ] = None
+		
+		profile_rows.append( row )
+	
+	return pd.DataFrame( profile_rows )
+
+def drop_column( table: str, column: str ) -> None:
+	"""Drop a column from a SQLite table.
+
+	Purpose:
+		Rebuilds the selected table without the specified column while preserving remaining
+		column definitions, data, and indexes that do not depend on the dropped column.
+
+	Args:
+		table: SQLite table name.
+		column: SQLite column name.
+
+	Raises:
+		ValueError: Raised when the table, column, or resulting schema would be invalid.
+	"""
+	if not table or not column:
+		raise ValueError( "Table and column required." )
+	
+	with create_connection( ) as conn:
+		schema = conn.execute( f'PRAGMA table_info("{table}");' ).fetchall( )
+		if not schema:
+			raise ValueError( "Table definition not found." )
+		
+		col_names = [ r[ 1 ] for r in schema ]
+		if column not in col_names:
+			raise ValueError( "Column not found." )
+		
+		remaining = [ r for r in schema if r[ 1 ] != column ]
+		if not remaining:
+			raise ValueError( "Cannot drop the only remaining column." )
+		
+		temp_table = f"{table}_rebuild_temp"
+		
+		pk_cols = [ r for r in remaining if int( r[ 5 ] or 0 ) > 0 ]
+		single_pk = len( pk_cols ) == 1
+		
+		new_defs: List[ str ] = [ ]
+		for row in remaining:
+			col_name = row[ 1 ]
+			col_type = row[ 2 ] or ''
+			not_null = int( row[ 3 ] or 0 )
+			default_value = row[ 4 ]
+			pk = int( row[ 5 ] or 0 )
+			
+			col_def = f'"{col_name}" {col_type}'.strip( )
+			
+			if not_null:
+				col_def += ' NOT NULL'
+			
+			if default_value is not None:
+				col_def += f' DEFAULT {default_value}'
+			
+			if single_pk and pk == 1:
+				col_def += ' PRIMARY KEY'
+			
+			new_defs.append( col_def )
+		
+		new_create_sql = f'CREATE TABLE "{temp_table}" ({", ".join( new_defs )});'
+		
+		conn.execute( "BEGIN" )
+		conn.execute( new_create_sql )
+		
+		remaining_cols = [ r[ 1 ] for r in remaining ]
+		col_list = ", ".join( [ f'"{c}"' for c in remaining_cols ] )
+		
+		conn.execute(
+			f'INSERT INTO "{temp_table}" ({col_list}) '
+			f'SELECT {col_list} FROM "{table}";'
+		)
+		
+		indexes = conn.execute(
+			"""
+            SELECT sql
+            FROM sqlite_master
+            WHERE type ='index' AND tbl_name=? AND sql IS NOT NULL
+			""",
+			(table,)
+		).fetchall( )
+		
+		conn.execute( f'DROP TABLE "{table}";' )
+		conn.execute( f'ALTER TABLE "{temp_table}" RENAME TO "{table}";' )
+		
+		for idx in indexes:
+			idx_sql = idx[ 0 ]
+			if idx_sql and column not in idx_sql:
+				conn.execute( idx_sql )
+		
+		conn.commit( )
+
+# ------------- DOCQNA UTILITIES ----------------------
+
+def extract_text_from_bytes( file_bytes: bytes ) -> str:
+	"""Extract text from uploaded document bytes.
+
+	Purpose:
+		Attempts PDF extraction with PyMuPDF and falls back to defensive text decoding when
+		PDF parsing fails. The helper supports document preview, summarization, and retrieval
+		workflows.
+
+	Args:
+		file_bytes: Uploaded file bytes or PDF byte stream.
+
+	Returns:
+		str: Return value produced by the operation.
+	"""
+	try:
+		import fitz  # PyMuPDF
+		
+		doc = fitz.open( stream=file_bytes, filetype="pdf" )
+		text = ""
+		for page in doc:
+			text += page.get_text( )
+		return text.strip( )
+	
+	except Exception:
+		try:
+			return file_bytes.decode( errors="ignore" )
+		except Exception:
+			return ""
+
+def route_document_query( prompt: str ) -> str:
+	"""Route a document question through the chat pipeline.
+
+	Purpose:
+		Builds a retrieval-grounded Document Q&A input from the user prompt and submits it to
+		the shared local LLM generation workflow using current Streamlit runtime controls.
+
+	Args:
+		prompt: Document question or prompt text.
+
+	Returns:
+		str: Return value produced by the operation.
+	"""
+	user_input = build_docqna_input( prompt )
+	if not user_input:
+		user_input = (prompt or '').strip( )
+	
+	return run_llm_turn( user_input=user_input,
+		temperature=float( st.session_state.get( 'temperature', 0.0 ) ),
+		top_p=float( st.session_state.get( 'top_percent', 0.95 ) ),
+		repeat_penalty=float( st.session_state.get( 'repeat_penalty', 1.1 ) ),
+		max_tokens=int( st.session_state.get( 'max_tokens', 1024 ) ) or 1024,
+		stream=False, output=None )
+
+def summarize_active_document( ) -> str:
+	"""Summarize the active document context.
+
+	Purpose:
+		Constructs a structured summary prompt and routes the request through the Document Q&A
+		workflow. The shared generation pipeline applies current system instructions once.
+
+	Returns:
+		str: Return value produced by the operation.
+	"""
+	summary_prompt = """
+		Provide a clear, structured summary of this document.
+		Include:
+		- Purpose
+		- Key themes
+		- Major conclusions
+		- Important data points (if any)
+		- Policy implications (if applicable)
+		
+		Be precise and concise.
+		"""
+	return route_document_query( summary_prompt.strip( ) )
+
+def compute_fingerprint( active_docs: List[ str ], doc_bytes: Dict[ str, bytes ] ) -> str:
+	"""Compute a stable active-document fingerprint.
+
+	Purpose:
+		Hashes active document names, byte lengths, and byte content hashes to support cache
+		invalidation when uploaded Document Q&A inputs change.
+
+	Args:
+		active_docs: Active document names selected in session state.
+		doc_bytes: Mapping of document names to uploaded bytes.
+
+	Returns:
+		str: Return value produced by the operation.
+	"""
+	h = hashlib.sha256( )
+	for name in sorted( active_docs ):
+		b = doc_bytes.get( name, b'' )
+		h.update( name.encode( 'utf-8', errors='ignore' ) )
+		h.update( len( b ).to_bytes( 8, 'little', signed=False ) )
+		h.update( hashlib.sha256( b ).digest( ) )
+	return h.hexdigest( )
+
+def extract_text( file_bytes: bytes ) -> str:
+	"""Extract text from PDF bytes.
+
+	Purpose:
+		Uses PyMuPDF to read text from each page of a PDF byte stream and returns the combined
+		text for chunking and retrieval workflows.
+
+	Args:
+		file_bytes: Uploaded file bytes or PDF byte stream.
+
+	Returns:
+		str: Return value produced by the operation.
+	"""
+	if not file_bytes:
+		return ''
+	
+	try:
+		doc = fitz.open( stream=file_bytes, filetype='pdf' )
+		parts: List[ str ] = [ ]
+		for page in doc:
+			parts.append( page.get_text( 'text' ) or '' )
+		return '\n'.join( parts ).strip( )
+	except Exception as e:
+		write_error( e, 'document_qna', 'extract_text( file_bytes: bytes ) -> str' )
+		return ''
+
+def load_sqlite_vec( conn: sqlite3.Connection ) -> bool:
+	"""Load the sqlite-vec extension into a connection.
+
+	Purpose:
+		Attempts to register sqlite-vec support on the provided SQLite connection so Document
+		Q&A can use vector-table retrieval when available.
+
+	Args:
+		conn: SQLite connection.
+
+	Returns:
+		bool: Return value produced by the operation.
+	"""
+	try:
+		import sqlite_vec
+		
+		sqlite_vec.load( conn )
+		return True
+	except Exception as e:
+		write_error( e, 'document_qna', 'load_sqlite_vec( conn: sqlite3.Connection ) -> bool' )
+		return False
+
+def ensure_vec_schema( dim: int ) -> bool:
+	"""Ensure the Document Q&A vector schema exists.
+
+	Purpose:
+		Loads sqlite-vec and creates the docqna_vec virtual table for document embeddings when
+		the extension is available in the runtime environment.
+
+	Args:
+		dim: Embedding dimension used by the vector table.
+
+	Returns:
+		bool: Return value produced by the operation.
+	"""
+	conn = create_connection( )
+	try:
+		ok = load_sqlite_vec( conn )
+		if not ok:
+			return False
+		
+		cur = conn.cursor( )
+		cur.execute(
+			f'''
+			CREATE VIRTUAL TABLE IF NOT EXISTS docqna_vec
+			USING vec0(
+				embedding float[{int( dim )}],
+				doc_name TEXT,
+				chunk TEXT
+			);
+			'''
+		)
+		conn.commit( )
+		return True
+	except Exception as e:
+		write_error( e, 'document_qna', 'ensure_vec_schema( dim: int ) -> bool' )
+		return False
+	finally:
+		conn.close( )
+
+def rebuild_index( embedder: Any ) -> None:
+	"""Build session-local vectors atomically, without modifying the legacy database."""
+	active_docs = st.session_state.get( 'active_docs', [ ] ) or [ ]
+	doc_bytes = st.session_state.get( 'doc_bytes', { } ) or { }
+	model_id = cfg.FOUNDRY_EMBEDDING_MODEL
+	fingerprint = hashlib.sha256( (model_id + ':' + compute_fingerprint( active_docs, doc_bytes )).encode( ) ).hexdigest( )
+	if fingerprint == st.session_state.get( 'docqna_fingerprint' ):
+		return
+	staged = [ ]
+	for name in active_docs:
+		file_bytes = doc_bytes.get( name )
+		if not file_bytes:
+			continue
+		text = extract_text( file_bytes ) if Path( name ).suffix.lower( ) == '.pdf' else file_bytes.decode( 'utf-8', errors='replace' )
+		chunks = chunk_text( text )
+		if not chunks:
+			continue
+		vectors = np.asarray( embedder.encode( chunks ), dtype=np.float32 )
+		if vectors.ndim != 2 or vectors.shape[0] != len( chunks ):
+			raise ValueError( 'Embedding service returned an invalid batch shape.' )
+		staged.extend( (name, chunk, vector.tobytes( )) for chunk, vector in zip( chunks, vectors ) )
+	# Successful activation. Prior session index remains intact if any earlier step fails.
+	st.session_state[ 'docqna_fallback_rows' ] = staged
+	st.session_state[ 'docqna_chunk_count' ] = len( staged )
+	st.session_state[ 'docqna_vec_ready' ] = False
+	st.session_state[ 'docqna_fingerprint' ] = fingerprint
+
+
+def retrieve_chunks( query: str, k: int = 6 ) -> List[ Tuple[ str, str, float ] ]:
+	"""Search current session embeddings; never query legacy, shared sqlite-vec data."""
+	if not query or not query.strip( ):
+		return [ ]
+	embedder = load_embedder( )
+	rebuild_index( embedder )
+	query_vector = np.asarray( embedder.encode( [query] ), dtype=np.float32 )[0]
+	results = [ ]
+	for name, chunk, blob in st.session_state.get( 'docqna_fallback_rows', [ ] ):
+		vector = np.frombuffer( blob, dtype=np.float32 )
+		if vector.shape != query_vector.shape:
+			raise ValueError( 'Index embedding dimensions do not match the query.' )
+		results.append( (name, chunk, cosine_sim( query_vector, vector )) )
+	return sorted( results, key=lambda item: item[2], reverse=True )[ :max( 1, int( k ) ) ]
+
+def build_docqna_input( user_query: str, k: int = 6 ) -> str:
+	"""Build a retrieval-grounded Document Q&A prompt.
+
+	Purpose:
+		Retrieves relevant document excerpts and combines them with the user question to form
+		the grounded input submitted to the shared LLM pipeline. System instructions remain in
+		the dedicated system-message path.
+
+	Args:
+		user_query: User question for the Document Q&A workflow.
+		k: Number of retrieved chunks to include.
+
+	Returns:
+		str: Return value produced by the operation.
+	"""
+	hits = retrieve_chunks( user_query, k=int( k ) )
+	
+	context_blocks: List[ str ] = [ ]
+	for doc_name, chunk, score in hits:
+		context_blocks.append( f'[Document: {doc_name}]\n{chunk}'.strip( ) )
+	
+	context = '\n\n'.join( context_blocks ).strip( )
+	
+	prompt_parts: List[ str ] = [ ]
+	
+	if context:
+		prompt_parts.append(
+			'Use the following document excerpts to answer the question. If the excerpts do not contain '
+			'the answer, say you do not have enough information.\n\n'
+			f'{context}'
+		)
+	
+	prompt_parts.append( f'Question:\n{user_query}\n\nAnswer:' )
+	
+	return '\n\n'.join( prompt_parts ).strip( )
+
+# -------------- LLM  UTILITIES -------------------
+class FoundryEmbedder:
+	"""Compatibility adapter for Foundry GenericEmbeddingModel."""
+	def __init__( self, model_name: str ) -> None:
+		if not model_name:
+			raise ValueError( 'A Foundry embedding model alias/RID is required.' )
+		self.model_name = model_name
+
+	def encode( self, texts: List[str], show_progress_bar: bool = False ) -> np.ndarray:
+		from language_model_service_api.languagemodelservice_api_embeddings_v3 import GenericEmbeddingsRequest
+		from palantir_models.models import GenericEmbeddingModel
+		if isinstance( texts, str ):
+			texts = [texts]
+		if not texts or any( not isinstance( text, str ) or not text.strip( ) for text in texts ):
+			raise ValueError( 'Embedding inputs must be nonempty strings.' )
+		model = GenericEmbeddingModel.get( self.model_name )
+		batch_size = cfg.FOUNDRY_EMBED_BATCH_SIZE
+		all_vectors = [ ]
+		for i in range( 0, len( texts ), batch_size ):
+			batch = texts[i:i + batch_size]
+			response = model.create_embeddings( GenericEmbeddingsRequest( inputs=batch ) )
+			vectors = response.embeddings
+			if len( vectors ) != len( batch ):
+				raise ValueError( 'Foundry embedding result count differs from input count.' )
+			all_vectors.extend( vectors )
+		result = np.asarray( all_vectors, dtype=np.float32 )
+		if result.ndim != 2 or result.shape[1] == 0 or not np.isfinite( result ).all( ):
+			raise ValueError( 'Foundry returned malformed or non-finite embeddings.' )
+		return result
+
+
+@st.cache_resource
+def load_embedder( ) -> FoundryEmbedder:
+	"""Create a lazy adapter; remote inference occurs only when requested."""
+	return FoundryEmbedder( cfg.FOUNDRY_EMBEDDING_MODEL )
+
+def local_llm_enabled( ) -> bool:
+	"""Determine whether local LLM support is enabled.
+
+	Purpose:
+		Checks configuration and model-file availability to decide whether the local llama.cpp
+		model should be loaded in the current runtime environment.
+
+	Returns:
+		bool: Return value produced by the operation.
+	"""
+	try:
+		_is_enabled = bool( getattr( cfg, 'ENABLE_LOCAL_LLM', False ) )
+		return bool( _is_enabled and local_llm_available( ) )
+	except Exception as e:
+		write_error( e, 'local_llm', 'local_llm_enabled( ) -> bool' )
+		return False
+
+@st.cache_resource
+def load_llm( ctx: int, threads: int ) -> Any | None:
+	"""Load the optional local llama.cpp model.
+
+	Purpose:
+		Lazily imports llama_cpp and creates a cached Llama instance using the configured
+		model path, context window, CPU thread count, and batch settings when local support is
+		enabled.
+
+	Args:
+		ctx: Optional context window override.
+		threads: Optional CPU thread-count override.
+
+	Returns:
+		Any | None: Return value produced by the operation.
+	"""
+	try:
+		if not local_llm_enabled( ):
+			return None
+		
+		try:
+			from llama_cpp import Llama
+		except Exception:
+			return None
+		
+		return Llama(
+			model_path=str( cfg.MODEL_PATH ),
+			n_ctx=ctx,
+			n_threads=threads,
+			n_batch=512,
+			verbose=False
+		)
+	except Exception as e:
+		write_error( e, 'local_llm', 'load_llm( ctx: int, threads: int ) -> Any | None' )
+		return None
+
+def get_llm( ctx: int | None = None, threads: int | None = None ) -> Any | None:
+	"""Return the available local llama.cpp model.
+
+	Purpose:
+		Applies default context and thread settings when overrides are not supplied and
+		returns the cached local model instance when enabled and loadable.
+
+	Args:
+		ctx: Optional context window override.
+		threads: Optional CPU thread-count override.
+
+	Returns:
+		Any | None: Return value produced by the operation.
+	"""
+	try:
+		if not local_llm_enabled( ):
+			return None
+		
+		_ctx = int( ctx ) if ctx else int( getattr( cfg, 'DEFAULT_CTX', 0 ) )
+		_threads = int( threads ) if threads else int( getattr( cfg, 'CORES', 1 ) )
+		return load_llm( _ctx, _threads )
+	except Exception as e:
+		write_error( e, 'local_llm',
+			'get_llm( ctx: int | None, threads: int | None ) -> Any | None' )
+		return None
+
+def get_embedder( ) -> FoundryEmbedder | None:
+	"""Return the cached embedding model.
+
+	Purpose:
+		Returns the cached sentence-transformer model when it can be loaded and preserves a
+		None fallback when embedding support is unavailable.
+
+	Returns:
+		SentenceTransformer | None: Return value produced by the operation.
+	"""
+	try:
+		return load_embedder( )
+	except Exception as e:
+		write_error( e, 'embeddings', 'get_embedder( ) -> FoundryEmbedder | None' )
+		return None
+
+# ==============================================================================
+# Init
+# ==============================================================================
+initialize_database( )
+llm = None
+embedder = None
+
+if not isinstance( st.session_state.get( 'messages' ), list ):
+	st.session_state[ 'messages' ] = [ ]
+
+if len( st.session_state[ 'messages' ] ) == 0:
+	st.session_state[ 'messages' ] = load_history( )
+
+if 'system_instructions' not in st.session_state:
+	st.session_state[ 'system_instructions' ] = ''
+
+
+
+# ==============================================================================
+# SIDEBAR
+# ==============================================================================
+with st.sidebar:
+	style_subheaders( )
+	st.logo( cfg.LOGO, size='large' )
+	
+	st.divider( )
+	
+	if getattr( cfg, 'ENABLE_LOCAL_LLM', False ):
+		if local_llm_available( ):
+			st.caption( 'Local GGUF available.' )
+		else:
+			st.caption( 'Local GGUF not available in this environment.' )
+	
+	c1, c2 = st.columns( [ 0.05, 0.95 ] )
+	with c2:
+		st.subheader( '⚙️ Application Mode' )
+		st.markdown( cfg.BLUE_DIVIDER, unsafe_allow_html=True )
+		mode = st.radio( label='', options=cfg.MODES, index=0 )
+	
+	st.divider( )
+
+# ==============================================================================
+# TEXT GENERATION MODE
+# ==============================================================================
+if mode == 'Text Generation':
+	left, center, right = st.columns( [ 0.05, 0.9, 0.05 ] )
+	with center:
+		st.subheader( "💬 Text Generation", help=cfg.TEXT_GENERATION )
+		st.divider( )
+		messages = st.session_state.get( 'messages', [ ] )
+		max_tokens = st.session_state.get( 'max_tokens', 0 )
+		top_percent = st.session_state.get( 'top_percent', 0.0 )
+		top_k = st.session_state.get( 'top_k', 0 )
+		temperature = st.session_state.get( 'temperature', 0.0 )
+		is_grounded = st.session_state.get( 'is_grounded', False )
+		frequency_penalty = st.session_state.get( 'frequency_penalty', 0.0 )
+		presense_penalty = st.session_state.get( 'presense_penalty', 0.0 )
+		repeat_penalty = st.session_state.get( 'repeat_penalty', 0.0 )
+		repeat_window = st.session_state.get( 'repeat_window', 0.0 )
+		cpu_threads = st.session_state.get( 'cpu_threads', cfg.CORES )
+		context_window = st.session_state.get( 'context_window', cfg.DEFAULT_CTX )
+		
+		# ------------------------------------------------------------------
+		# Main Chat UI
+		# ------------------------------------------------------------------
+		# ------------------------------------------------------------------
+		# Expander — Mind Controls
+		# ------------------------------------------------------------------
+		with st.expander( label='Mind Controls', icon='🧠', expanded=False ):
+			with st.expander( label='⚙️ Response Controls', expanded=False ):
+				mind_c1, mind_c2, mind_c3, mind_c4 = st.columns( [ 0.25, 0.25, 0.25, 0.25 ],
+					border=True, gap='medium' )
+				
+				# ------------- Temperature ----------
+				with mind_c1:
+					set_temperature = st.slider( label='Temperature', min_value=0.0, max_value=1.0,
+						help=cfg.TEMPERATURE, key='temperature' )
+					
+					temperature = st.session_state[ 'temperature' ]
+				
+				# ------------- Top-P ----------
+				with mind_c2:
+					set_top_p = st.slider( label='Top-P', min_value=0.0, max_value=1.0,
+						step=0.01, key='top_percent', help=cfg.TOP_P )
+					
+					top_percent = st.session_state[ 'top_percent' ]
+				
+				# ------------- Top-K ----------
+				with mind_c3:
+					set_top_k = st.slider( label='Top-K', min_value=0, max_value=50, step=1,
+						key='top_k', help=cfg.TOP_K )
+					
+					top_k = st.session_state[ 'top_k' ]
+				
+				# ------------ Grounding --------
+				with mind_c4:
+					set_grounding = st.toggle( label='Use Grounding', value=False,
+						key='is_grounded' )
+					
+					is_grounded = st.session_state[ 'is_grounded' ]
+				
+				# ------------- Reset Settings ----------
+				if st.button( label='Reset', key='response_controls_reset',
+						width='stretch', icon='🔄' ):
+					for key in [ 'top_k', 'top_percent', 'temperature', 'is_grounded' ]:
+						if key in st.session_state:
+							del st.session_state[ key ]
+					
+					st.rerun( )
+			
+			# ------------------------------------------------------------------
+			# Expander — Probability Controls
+			# ------------------------------------------------------------------
+			with st.expander( label='🎚️ Probability Controls', expanded=False ):
+				prob_c1, prob_c2, prob_c3, prob_c4 = st.columns( [ 0.25, 0.25, 0.25, 0.25 ],
+					border=True, gap='medium' )
+				
+				# ------------- Repeat Window ----------
+				with prob_c1:
+					set_repeat_last_n = st.slider( label='Repeat Window', min_value=0,
+						max_value=1024,
+						step=16, key='repeat_window', help=cfg.REPEAT_WINDOW )
+					
+					repeat_window = st.session_state[ 'repeat_window' ]
+				
+				# ------------- Repeat Penalty ----------
+				with prob_c2:
+					set_repeat_penalty = st.slider( label='Repeat Penalty', min_value=0.0,
+						max_value=2.0,
+						key='repeat_penalty', step=0.05, help=cfg.REPEAT_PENALTY )
+					
+					repeat_penalty = st.session_state[ 'repeat_penalty' ]
+				
+				# ------------- Presense Penalty ----------
+				with prob_c3:
+					set_presence_penalty = st.slider( label='Presence Penalty', min_value=0.0,
+						max_value=2.0,
+						key='presense_penalty', step=0.05, help=cfg.PRESENCE_PENALTY )
+					
+					presense_penalty = st.session_state[ 'presense_penalty' ]
+				
+				# ------------- Frequency Penalty ----------
+				with prob_c4:
+					set_frequency_penalty = st.slider( label='Frequency Penalty', min_value=0.0,
+						max_value=2.0,
+						key='frequency_penalty', step=0.05, help=cfg.FREQUENCY_PENALTY )
+					
+					frequency_penalty = st.session_state[ 'frequency_penalty' ]
+				
+				# ------------- Reset Settings ----------
+				if st.button( label='Reset', key='probability_controls_reset',
+						width='stretch', icon='🔄'  ):
+					for key in [ 'frequency_penalty', 'presense_penalty',
+					             'temperature', 'repeat_penalty', 'repeat_window' ]:
+						if key in st.session_state:
+							del st.session_state[ key ]
+					
+					st.rerun( )
+			
+			# ------------------------------------------------------------------
+			# Expander — Context Controls
+			# ------------------------------------------------------------------
+			with st.expander( label='🎛️ Context Controls', expanded=False ):
+				ctx_c1, ctx_c2, ctx_c3, ctx_c4 = st.columns( [ 0.25, 0.25, 0.25, 0.25 ],
+					border=True, gap='medium' )
+				
+				# ------------- Context Window ----------
+				with ctx_c1:
+					set_ctx = st.slider( label='Context Window', min_value=0, max_value=8192,
+						key='context_window', step=512, help=cfg.CONTEXT_WINDOW )
+					
+					context_window = st.session_state[ 'context_window' ]
+				
+				# ------------- CPU Threads ----------
+				with ctx_c2:
+					set_threads = st.slider( label='CPU Threads', min_value=0, max_value=cfg.CORES,
+						key='cpu_threads', step=1, help=cfg.CPU_CORES, )
+					
+					threads = st.session_state[ 'cpu_threads' ]
+				
+				# ------------- Max Tokens ----------
+				with ctx_c3:
+					set_max_tokens = st.slider( label='Max Tokens', min_value=0, max_value=4096,
+						step=128,
+						key='max_tokens', help=cfg.MAX_TOKENS, )
+				
+				# ------------- Random Seed ----------
+				with ctx_c4:
+					set_seed = st.slider( label="Random Seed", min_value=0, max_value=4096, step=1,
+						key='random_seed', help=cfg.SEED )
+				
+				# ------------- Reset Settings ----------
+				if st.button( label='Reset', key='context_controls_reset',
+						width='stretch', icon='🔄' ):
+					for key in [ 'random_seed', 'max_tokens', 'cpu_threads', 'context_window' ]:
+						if key in st.session_state:
+							del st.session_state[ key ]
+					
+					st.rerun( )
+		
+		# ------------------------------------------------------------------
+		# Expander — System Instructions
+		# ------------------------------------------------------------------
+		render_system_instructions( category_key='text_instruction_category',
+			prompt_key='text_instruction_prompt_id', clear_key='text_instruction_clear' )
+		
+		st.markdown( cfg.BLUE_DIVIDER, unsafe_allow_html=True )
+		
+		for r, c in st.session_state.messages:
+			with st.chat_message( r ):
+				st.markdown( c )
+		
+		user_input = st.chat_input( 'Ask Leeroy…' )
+		if user_input:
+			save_message( 'user', user_input )
+			st.session_state.messages.append( ('user', user_input) )
+			
+			with st.chat_message( 'user' ):
+				st.markdown( user_input )
+			
+			with st.chat_message( 'assistant' ):
+				out = st.empty( )
+				buf = run_llm_turn( user_input=user_input, temperature=float( temperature ),
+					top_p=float( top_percent ), repeat_penalty=float( repeat_penalty ),
+					max_tokens=1024, stream=True, output=out )
+			
+			save_message( 'assistant', buf )
+			st.session_state.messages.append( ('assistant', buf) )
+		
+		if st.button( '🧹 Clear Chat' ):
+			clear_history( )
+			st.session_state.messages = [ ]
+			st.rerun( )
+
+# ==============================================================================
+# RETRIEVAL AUGMENTATION
+# ==============================================================================
+elif mode == 'Document Q&A':
+	left, center, right = st.columns( [ 0.05, 0.9, 0.05 ] )
+	with center:
+		st.subheader( "📚 Retrieval Augementation", help=cfg.RETRIEVAL_AUGMENTATION )
+		st.divider( )
+		messages = st.session_state.get( 'messages', [ ] )
+		uploaded = st.session_state.get( 'uploaded', [ ] )
+		active_docs = st.session_state.get( 'active_docs', [ ] )
+		doc_bytes = st.session_state.get( 'doc_bytes', { } )
+		max_tokens = st.session_state.get( 'max_tokens', 0 )
+		top_percent = st.session_state.get( 'top_percent', 0.0 )
+		top_k = st.session_state.get( 'top_k', 0 )
+		temperature = st.session_state.get( 'temperature', 0.0 )
+		frequency_penalty = st.session_state.get( 'frequency_penalty', 0.0 )
+		presense_penalty = st.session_state.get( 'presense_penalty', 0.0 )
+		repeat_penalty = st.session_state.get( 'repeat_penalty', 0.0 )
+		repeat_window = st.session_state.get( 'repeat_window', 0.0 )
+		cpu_threads = st.session_state.get( 'cpu_threads', cfg.CORES )
+		context_window = st.session_state.get( 'context_window', cfg.DEFAULT_CTX )
+		
+		# ------------------------------------------------------------------
+		# Expander — Mind Controls
+		# ------------------------------------------------------------------
+		with st.expander( label='Mind Controls', icon='🧠', expanded=False ):
+			with st.expander( label='⚙️ Response Controls', expanded=False ):
+				mind_c1, mind_c2, mind_c3 = st.columns( [ .33, .33, .33 ], border=True,
+					gap='medium' )
+				
+				# ------------- Temperature ----------
+				with mind_c1:
+					set_temperature = st.slider( label='Temperature', min_value=0.0, max_value=1.0,
+						value=float( st.session_state.get( 'temperature' ) ),
+						help=cfg.TEMPERATURE, key='temperature' )
+					
+					temperature = st.session_state[ 'temperature' ]
+				
+				# ------------- Top-P ----------
+				with mind_c2:
+					set_top_p = st.slider( label='Top-P', min_value=0.0, max_value=1.0,
+						step=0.01, key='top_percent', help=cfg.TOP_P )
+					
+					top_percent = st.session_state[ 'top_percent' ]
+				
+				# ------------- Top-K ----------
+				with mind_c3:
+					set_top_k = st.slider( label='Top-K', min_value=0, max_value=50, step=1,
+						key='top_k', help=cfg.TOP_K )
+					
+					top_k = st.session_state[ 'top_k' ]
+				
+				# ------------- Reset Settings ----------
+				if st.button( label='Reset', key='response_controls_reset',
+						width='stretch', icon='🔄'  ):
+					for key in [ 'top_k', 'top_percent', 'temperature' ]:
+						if key in st.session_state:
+							del st.session_state[ key ]
+					
+					st.rerun( )
+			
+			# ------------------------------------------------------------------
+			# Expander — Probability Controls
+			# ------------------------------------------------------------------
+			with st.expander( label='🎚️ Probability Controls', expanded=False ):
+				prob_c1, prob_c2, prob_c3, prob_c4 = st.columns( [ 0.25, 0.25, 0.25, 0.25 ],
+					border=True, gap='medium' )
+				
+				# ------------- Repeat Window ----------
+				with prob_c1:
+					set_repeat_last_n = st.slider( label='Repeat Window', min_value=0,
+						max_value=1024,
+						step=16, key='repeat_window', help=cfg.REPEAT_WINDOW )
+					
+					repeat_window = st.session_state[ 'repeat_window' ]
+				
+				# ------------- Repeat Penalty ----------
+				with prob_c2:
+					set_repeat_penalty = st.slider( label='Repeat Penalty', min_value=0.0,
+						max_value=2.0, key='repeat_penalty', step=0.05, help=cfg.REPEAT_PENALTY )
+					
+					repeat_penalty = st.session_state[ 'repeat_penalty' ]
+				
+				# ------------- Presense Penalty ----------
+				with prob_c3:
+					set_presence_penalty = st.slider( label='Presence Penalty', min_value=0.0,
+						max_value=2.0, key='presense_penalty', step=0.05, help=cfg.PRESENCE_PENALTY )
+					
+					presense_penalty = st.session_state[ 'presense_penalty' ]
+				
+				# ------------- Frequency Penalty ----------
+				with prob_c4:
+					set_frequency_penalty = st.slider( label='Frequency Penalty', min_value=0.0,
+						max_value=2.0, key='frequency_penalty', step=0.05, help=cfg.FREQUENCY_PENALTY )
+					
+					frequency_penalty = st.session_state[ 'frequency_penalty' ]
+				
+				# ------------- Reset Settings ----------
+				if st.button( label='Reset', key='probability_controls_reset',
+						width='stretch', icon='🔄'  ):
+					for key in [ 'frequency_penalty', 'presense_penalty',
+					             'temperature', 'repeat_penalty', 'repeat_window' ]:
+						if key in st.session_state:
+							del st.session_state[ key ]
+					
+					st.rerun( )
+			
+			# ------------------------------------------------------------------
+			# Expander — Context Controls
+			# ------------------------------------------------------------------
+			with st.expander( label='🎛️ Context Controls', expanded=False ):
+				ctx_c1, ctx_c2, ctx_c3, ctx_c4 = st.columns( [ 0.25, 0.25, 0.25, 0.25 ],
+					border=True, gap='medium' )
+				
+				# ------------- Context Window ----------
+				with ctx_c1:
+					set_ctx = st.slider( label='Context Window', min_value=0, max_value=8192,
+						key='context_window', step=512, help=cfg.CONTEXT_WINDOW )
+					
+					context_window = st.session_state[ 'context_window' ]
+				
+				# ------------- CPU Threads ----------
+				with ctx_c2:
+					set_threads = st.slider( label='CPU Threads', min_value=0, max_value=cfg.CORES,
+						key='cpu_threads', step=1, help=cfg.CPU_CORES, )
+					
+					threads = st.session_state[ 'cpu_threads' ]
+				
+				# ------------- Max Tokens ----------
+				with ctx_c3:
+					set_max_tokens = st.slider( label='Max Tokens', min_value=0, max_value=4096,
+						step=128,
+						key='max_tokens', help=cfg.MAX_TOKENS, )
+				
+				# ------------- Random Seed ----------
+				with ctx_c4:
+					set_seed = st.slider( label="Random Seed", min_value=0, max_value=4096, step=1,
+						key='random_seed', help=cfg.SEED )
+				
+				# ------------- Reset Settings ----------
+				if st.button( label='Reset', key='context_controls_reset',
+						width='stretch', icon='🔄'  ):
+					for key in [ 'random_seed', 'max_tokens', 'cpu_threads', 'context_window' ]:
+						if key in st.session_state:
+							del st.session_state[ key ]
+					
+					st.rerun( )
+		
+		# ------------------------------------------------------------------
+		# Expander — System Instructions
+		# ------------------------------------------------------------------
+		render_system_instructions( category_key='docqna_instruction_category',
+			prompt_key='docqna_instruction_prompt_id', clear_key='docqna_instruction_clear' )
+		
+		# ------------------------------------------------------------------
+		# Document Selection UI
+		# ------------------------------------------------------------------
+		with st.expander( label='Document Loader', icon='📥', expanded=False, width='stretch' ):
+			doc_left, doc_right = st.columns( [ 0.5, 0.5 ], gap='medium', border=True )
+			with doc_left:
+				doc_source = st.radio( label='Document Source', options=[ 'uploadlocal' ],
+					index=0, horizontal=True, key='doc_source' )
+				
+				uploaded = st.file_uploader( label='Upload a document (PDF, TXT, DOCX)',
+					type=[ 'pdf', 'txt', 'docx' ], accept_multiple_files=True,
+					label_visibility='visible' )
+				
+				if uploaded is not None and type( uploaded ) == list and len( uploaded ) > 0:
+					st.session_state.uploaded = uploaded
+					
+					names: List[ str ] = [ f.name for f in uploaded if getattr( f, 'name', None ) ]
+					st.session_state.active_docs = names
+					if 'doc_bytes' not in st.session_state or not isinstance(
+							st.session_state.doc_bytes, dict ):
+						st.session_state.doc_bytes = { }
+					
+					for f in uploaded:
+						try:
+							if getattr( f, 'name', None ):
+								st.session_state.doc_bytes[ f.name ] = f.getvalue( )
+						except Exception:
+							continue
+				else:
+					st.info( 'Load a document.' )
+				
+				unload = st.button( label='Unload Document', width='stretch' )
+				if unload:
+					st.session_state.uploaded = [ ]
+					st.session_state.active_docs = [ ]
+					st.session_state.doc_bytes = { }
+			
+			with doc_right:
+				if st.session_state.get( 'active_docs' ):
+					name = st.session_state.active_docs[ 0 ]
+					file_bytes = st.session_state.doc_bytes.get( name )
+					if file_bytes:
+						st.pdf( file_bytes, height=420 ) if Path( name ).suffix.lower( ) == '.pdf' else st.text( file_bytes.decode( 'utf-8', errors='replace' ) if Path( name ).suffix.lower( ) == '.txt' else 'Preview is unavailable for DOCX; the uploaded file remains available.' )
+					else:
+						st.info( "Document loaded but preview unavailable." )
+				else:
+					st.info( "No document loaded." )
+		
+		# ------------------------------------------------------------------
+		# Chat History Render
+		# ------------------------------------------------------------------
+		if 'messages' not in st.session_state or not isinstance( st.session_state.messages, list ):
+			st.session_state.messages = [ ]
+		
+		for msg in st.session_state.messages:
+			role = ''
+			content = ''
+			
+			if isinstance( msg, dict ):
+				role = str( msg.get( 'role', '' ) or '' ).strip( )
+				content = msg.get( 'content', '' )
+			else:
+				if isinstance( msg, tuple ) or isinstance( msg, list ):
+					if len( msg ) == 2:
+						role = str( msg[ 0 ] or '' ).strip( )
+						content = msg[ 1 ]
+					else:
+						role = ''
+						content = ''
+				else:
+					role = ''
+					content = ''
+			
+			if role not in ('user', 'assistant', 'system'):
+				continue
+			
+			if content is None:
+				content = ''
+			elif not isinstance( content, str ):
+				content = str( content )
+			
+			with st.chat_message( role ):
+				st.markdown( content )
+		
+		st.markdown( cfg.BLUE_DIVIDER, unsafe_allow_html=True )
+		
+		# ------------------------------------------------------------------
+		# Chat Input
+		# ------------------------------------------------------------------
+		user_input = st.chat_input( 'Ask a question about the document' )
+		if user_input and isinstance( user_input, str ) and user_input.strip( ):
+			user_input = user_input.strip( )
+			
+			if 'messages' not in st.session_state or not isinstance( st.session_state.messages,
+					list ):
+				st.session_state.messages = [ ]
+			
+			save_message( 'user', user_input )
+			st.session_state.messages.append( ('user', user_input) )
+			
+			with st.chat_message( 'user' ):
+				st.markdown( user_input )
+			
+			doc_user_input = build_docqna_input( user_input )
+			if not doc_user_input or not isinstance( doc_user_input,
+					str ) or not doc_user_input.strip( ):
+				doc_user_input = user_input
+			
+			with st.chat_message( 'assistant' ):
+				out = st.empty( )
+				response = run_llm_turn( user_input=doc_user_input,
+					temperature=float( st.session_state.get( 'temperature', 0.0 ) ),
+					top_p=float( st.session_state.get( 'top_percent', 0.95 ) ),
+					repeat_penalty=float( st.session_state.get( 'repeat_penalty', 1.1 ) ),
+					max_tokens=int( st.session_state.get( 'max_tokens', 1024 ) ) or 1024,
+					stream=True, output=out )
+			
+			if response is None:
+				response = ''
+			elif not isinstance( response, str ):
+				response = str( response )
+			
+			response = response.strip( )
+			save_message( 'assistant', response )
+			st.session_state.messages.append( ('assistant', response) )
+
+# ==============================================================================
+# SEMANTIC SEARCH
+# ==============================================================================
+elif mode == 'Semantic Search':
+	left, center, right = st.columns( [ 0.05, 0.90, 0.05 ] )
+	with center:
+		st.subheader( "🔍 Semantic Search", help=cfg.SEMANTIC_SEARCH )
+		st.divider( )
+		
+		# ------------------------------------------------------------------
+		# Main Chat UI
+		# ------------------------------------------------------------------
+		left, center, right = st.columns( [ 0.05, 0.9, 0.05 ] )
+		with center:
+			st.session_state.use_semantic = st.checkbox( 'Use Semantic Context',
+				st.session_state.use_semantic )
+			files = st.file_uploader( 'Upload for embedding', accept_multiple_files=True )
+			if files:
+				local_embedder = get_embedder( )
+				if local_embedder is None:
+					st.error( 'Embedding model is unavailable in this environment.' )
+				else:
+					chunks = [ ]
+					for f in files:
+						chunks.extend( chunk_text( f.read( ).decode( errors='ignore' ) ) )
+					
+					if chunks:
+						vecs = local_embedder.encode( chunks )
+						staged = [ (chunk, np.asarray(vector, dtype=np.float32).tobytes()) for chunk, vector in zip(chunks, vecs) ]
+						st.session_state['semantic_session_rows'] = staged
+						st.session_state['semantic_model_id'] = cfg.FOUNDRY_EMBEDDING_MODEL
+						st.success( 'Semantic index built' )
+
+# ==============================================================================
+# PROMPT ENGINEERING MODE
+# ==============================================================================
+elif mode == 'Prompt Engineering':
+	left, center, right = st.columns( [ 0.05, 0.90, 0.05 ] )
+	with center:
+		st.subheader( '📝 Prompt Engineering', help=cfg.PROMPT_ENGINEERING )
+		st.divider( )
+
+		TABLE = 'Prompts'
+		PAGE_SIZE = 10
+		st.session_state.setdefault( 'pe_cascade_enabled', False )
+		st.checkbox( 'Cascade selection into System Instructions', key='pe_cascade_enabled' )
+
+		# ------------------------------------------------------------------
+		# Session state
+		# ------------------------------------------------------------------
+		st.session_state.setdefault( 'pe_page', 1 )
+		st.session_state.setdefault( 'pe_search', '' )
+		st.session_state.setdefault( 'pe_sort_col', 'ID' )
+		st.session_state.setdefault( 'pe_sort_dir', 'ASC' )
+		st.session_state.setdefault( 'pe_selected_id', None )
+		st.session_state.setdefault( 'pe_caption', '' )
+		st.session_state.setdefault( 'pe_name', '' )
+		st.session_state.setdefault( 'pe_category', '' )
+		st.session_state.setdefault( 'pe_text', '' )
+		st.session_state.setdefault( 'pe_jump_id', 1 )
+		st.session_state.setdefault( 'pe_notice', '' )
+		sort_columns = [ 'ID', 'Caption', 'Name', 'Category', 'Text' ]
+		if st.session_state.pe_sort_col not in sort_columns:
+			st.session_state.pe_sort_col = 'ID'
+		if st.session_state.pe_sort_dir not in [ 'ASC', 'DESC' ]:
+			st.session_state.pe_sort_dir = 'ASC'
+
+		# ------------------------------------------------------------------
+		# DB helpers
+		# ------------------------------------------------------------------
+		def get_conn( ) -> sqlite3.Connection:
+			"""Create a Prompt Engineering database connection.
+
+			Returns:
+				sqlite3.Connection: Open connection to the configured application database.
+			"""
+			return sqlite3.connect( cfg.DB_PATH )
+
+		def reset_selection( ) -> None:
+			"""Reset the Prompt Engineering record selection and editor fields.
+
+			Returns:
+				None: This function performs its work through side effects and does not return a value.
+			"""
+			st.session_state.pe_selected_id = None
+			st.session_state.pe_caption = ''
+			st.session_state.pe_name = ''
+			st.session_state.pe_category = ''
+			st.session_state.pe_text = ''
+
+		def load_prompt( pid: int ) -> None:
+			"""Load one prompt into the Prompt Engineering editor.
+
+			Args:
+				pid: Prompt primary key value.
+
+			Returns:
+				None: This function performs its work through side effects and does not return a value.
+			"""
+			with get_conn( ) as conn:
+				select_query = f"SELECT Caption, Name, Category, Text FROM {TABLE} WHERE ID=?"
+				cur = conn.execute( select_query, (pid,), )
+				row = cur.fetchone( )
+				if not row:
+					return
+				st.session_state.pe_caption = str( row[ 0 ] or '' )
+				st.session_state.pe_name = str( row[ 1 ] or '' )
+				st.session_state.pe_category = str( row[ 2 ] or '' )
+				st.session_state.pe_text = str( row[ 3 ] or '' )
+				if st.session_state.pe_cascade_enabled:
+					st.session_state.system_instructions = str( row[ 3 ] or '' )
+					st.session_state.active_prompt_id = int( pid )
+					st.session_state.active_prompt_caption = str( row[ 0 ] or '' )
+					st.session_state.active_prompt_name = str( row[ 1 ] or '' )
+					st.session_state.active_prompt_category = str( row[ 2 ] or '' )
+
+		def save_prompt_record( ) -> None:
+			"""Create or update the prompt currently shown in the editor.
+
+			Returns:
+				None: This function performs its work through side effects and does not return a value.
+			"""
+			data = {
+				'Caption': st.session_state.pe_caption,
+				'Name': st.session_state.pe_name,
+				'Category': st.session_state.pe_category,
+				'Text': st.session_state.pe_text,
+			}
+			if st.session_state.pe_selected_id is None:
+				insert_prompt( data )
+			else:
+				update_prompt( int( st.session_state.pe_selected_id ), data )
+			st.session_state.pe_notice = 'Saved.'
+			reset_selection( )
+
+		def delete_prompt_record( ) -> None:
+			"""Delete the selected prompt record.
+
+			Returns:
+				None: This function performs its work through side effects and does not return a value.
+			"""
+			if st.session_state.pe_selected_id is not None:
+				delete_prompt( int( st.session_state.pe_selected_id ) )
+				st.session_state.pe_notice = 'Deleted.'
+				reset_selection( )
+
+		if st.session_state.pe_notice:
+			st.success( st.session_state.pop( 'pe_notice' ) )
+
+		# ------------------------------------------------------------------
+		# Filters
+		# ------------------------------------------------------------------
+		c1, c2, c3, c4 = st.columns( [ 4, 2, 2, 3 ] )
+		with c1:
+			st.text_input( 'Search (Caption/Name/Category/Text contains)', key='pe_search' )
+
+		with c2:
+			st.selectbox( 'Sort by', sort_columns, key='pe_sort_col' )
+
+		with c3:
+			st.selectbox( 'Direction', [ 'ASC', 'DESC' ], key='pe_sort_dir' )
+
+		with c4:
+			st.markdown(
+				"<div style='font-size:0.95rem;font-weight:600;margin-bottom:0.25rem;'>Go to ID</div>",
+				unsafe_allow_html=True, )
+
+			a1, a2, a3 = st.columns( [ 2, 1, 1 ] )
+			with a1:
+				st.number_input( 'Go to ID', min_value=1, step=1, label_visibility='collapsed',
+					key='pe_jump_id' )
+
+			with a2:
+				if st.button( 'Go' ):
+					st.session_state.pe_selected_id = int( st.session_state.pe_jump_id )
+					load_prompt( int( st.session_state.pe_jump_id ) )
+
+			with a3:
+				st.button( 'Clear', on_click=reset_selection )
+
+		# ------------------------------------------------------------------
+		# Load prompt table
+		# ------------------------------------------------------------------
+		where = ''
+		params = [ ]
+		if st.session_state.pe_search:
+			where = 'WHERE Caption LIKE ? OR Name LIKE ? OR Category LIKE ? OR Text LIKE ?'
+			search_text = f"%{st.session_state.pe_search}%"
+			params.extend( [ search_text, search_text, search_text, search_text ] )
+
+		count_query = f"SELECT COUNT(*) FROM {TABLE} {where}"
+		with get_conn( ) as conn:
+			total_rows = conn.execute( count_query, params ).fetchone( )[ 0 ]
+
+		total_pages = max( 1, math.ceil( total_rows / PAGE_SIZE ) )
+		st.session_state.pe_page = max( 1,
+			min( int( st.session_state.pe_page ), total_pages ) )
+		offset = (st.session_state.pe_page - 1) * PAGE_SIZE
+		query = f"""
+	        SELECT ID, Caption, Name, Category, Text
+	        FROM {TABLE}
+	        {where}
+	        ORDER BY {st.session_state.pe_sort_col} {st.session_state.pe_sort_dir}
+	        LIMIT {PAGE_SIZE} OFFSET {offset}
+	    """
+
+		with get_conn( ) as conn:
+			rows = conn.execute( query, params ).fetchall( )
+
+		# ------------------------------------------------------------------
+		# Prompt table
+		# ------------------------------------------------------------------
+		table_rows = [ ]
+		for r in rows:
+			table_rows.append( {
+					'Selected': r[ 0 ] == st.session_state.pe_selected_id,
+					'ID': r[ 0 ],
+					'Caption': r[ 1 ],
+					'Name': r[ 2 ],
+					'Category': r[ 3 ],
+					'Text': r[ 4 ],
+			} )
+
+		edited = st.data_editor( table_rows, hide_index=True, use_container_width=True,
+			disabled=[ 'ID', 'Caption', 'Name', 'Category', 'Text' ], key='prompt_table_v2' )
+
+		# ------------------------------------------------------------------
+		# SELECTION PROCESSING (must run BEFORE widgets below)
+		# ------------------------------------------------------------------
+		selected = [ r for r in edited if isinstance( r, dict ) and r.get( 'Selected' ) ]
+		if len( selected ) == 1:
+			pid = int( selected[ 0 ][ 'ID' ] )
+			if pid != st.session_state.pe_selected_id:
+				st.session_state.pe_selected_id = pid
+				load_prompt( pid )
+
+		elif len( selected ) == 0 and any(
+				row[ 0 ] == st.session_state.pe_selected_id for row in rows ):
+			reset_selection( )
+
+		elif len( selected ) > 1:
+			st.warning( 'Select exactly one prompt row.' )
+
+		# ------------------------------------------------------------------
+		# Paging
+		# ------------------------------------------------------------------
+		p1, p2, p3 = st.columns( [ 0.25, 3.5, 0.25 ] )
+		with p1:
+			if st.button( "◀ Prev" ) and st.session_state.pe_page > 1:
+				st.session_state.pe_page -= 1
+
+		with p2:
+			st.markdown( f"Page **{st.session_state.pe_page}** of **{total_pages}**" )
+
+		with p3:
+			if st.button( "Next ▶" ) and st.session_state.pe_page < total_pages:
+				st.session_state.pe_page += 1
+
+		st.markdown( cfg.BLUE_DIVIDER, unsafe_allow_html=True )
+
+		# ------------------------------------------------------------------
+		# Edit Prompt
+		# ------------------------------------------------------------------
+		with st.expander( "🖊️ Edit Prompt", expanded=False ):
+			st.text_input( 'ID', value=st.session_state.pe_selected_id or '', disabled=True )
+			st.text_input( 'Caption', key='pe_caption' )
+			st.text_input( 'Name', key='pe_name' )
+			st.text_input( 'Category', key='pe_category' )
+			st.text_area( 'Text', key='pe_text', height=260 )
+
+			c1, c2, c3 = st.columns( 3 )
+			with c1:
+				save_label = '💾 Save Changes' if st.session_state.pe_selected_id else '➕ Create Prompt'
+				st.button( save_label, on_click=save_prompt_record )
+
+			with c2:
+				st.button( 'Delete', disabled=st.session_state.pe_selected_id is None,
+					on_click=delete_prompt_record )
+
+			with c3:
+				st.button( '🧹 Clear Selection', on_click=reset_selection )
+
+# ==============================================================================
+# DATA MANAGEMENT MODE
+# ==============================================================================
+elif mode == 'Data Management':
+	left, center, right = st.columns( [ 0.05, 0.90, 0.05 ] )
+	with center:
+		st.subheader( '🏛️ Data Management', help=cfg.DATA_MANAGEMENT )
+		st.divider( )
+		tabs = st.tabs( [ '📥 Import', '🗂 Browse', '💉 CRUD', '📊 Explore', '🔎 Filter',
+		                  '🧮 Aggregate', '📈 Visualize', '⚙ Admin', '🧠 SQL' ] )
+		
+		tables = list_tables( )
+		if not tables:
+			st.info( "No tables available." )
+		else:
+			table = st.selectbox( "Table", tables )
+			df_full = read_table( table )
+		
+		# ------------------------------------------------------------------------------
+		# UPLOAD TAB
+		# ------------------------------------------------------------------------------
+		with tabs[ 0 ]:
+			uploaded_file = st.file_uploader( 'Upload Excel File', type=[ 'xlsx' ] )
+			overwrite = st.checkbox( 'Overwrite existing tables', value=True )
+			if uploaded_file:
+				try:
+					sheets = pd.read_excel( uploaded_file, sheet_name=None )
+					with create_connection( ) as conn:
+						conn.execute( 'BEGIN' )
+						for sheet_name, df in sheets.items( ):
+							table_name = create_identifier( sheet_name )
+							if overwrite:
+								conn.execute( f'DROP TABLE IF EXISTS "{table_name}"' )
+							
+							# --- Create Table ---
+							columns = [ ]
+							df.columns = [ create_identifier( c ) for c in df.columns ]
+							for col in df.columns:
+								sql_type = get_sqlite_type( df[ col ].dtype )
+								columns.append( f'"{col}" {sql_type}' )
+							
+							create_stmt = (
+									f'CREATE TABLE "{table_name}" '
+									f'({", ".join( columns )});'
+							)
+							
+							conn.execute( create_stmt )
+							
+							# --- Insert Data ---
+							placeholders = ", ".join( [ "?" ] * len( df.columns ) )
+							insert_stmt = (
+									f'INSERT INTO "{table_name}" '
+									f'VALUES ({placeholders});'
+							)
+							
+							conn.executemany(
+								insert_stmt,
+								df.where( pd.notnull( df ), None ).values.tolist( )
+							)
+						
+						conn.commit( )
+					
+					st.success( 'Import completed successfully (transaction committed).' )
+					st.rerun( )
+				
+				except Exception as e:
+					try:
+						conn.rollback( )
+					except:
+						pass
+					st.error( f'Import failed — transaction rolled back.\n\n{e}' )
+		
+		# ------------------------------------------------------------------------------
+		# BROWSE TAB
+		# ------------------------------------------------------------------------------
+		with tabs[ 1 ]:
+			tables = list_tables( )
+			if tables:
+				table = st.selectbox( 'Table', tables, key='table_name' )
+				df = read_table( table )
+				st.dataframe( df, use_container_width=True )
+			else:
+				st.info( 'No tables available.' )
+		
+		# ------------------------------------------------------------------------------
+		# CRUD (Schema-Aware)
+		# ------------------------------------------------------------------------------
+		with tabs[ 2 ]:
+			tables = list_tables( )
+			if not tables:
+				st.info( 'No tables available.' )
+			else:
+				table = st.selectbox( 'Select Table', tables, key='crud_table' )
+				df = read_table( table )
+				schema = create_schema( table )
+				
+				# Build type map
+				type_map = { col[ 1 ]: col[ 2 ].upper( ) for col in schema if col[ 1 ] != 'rowid' }
+				
+				# ------------------------------------------------------------------
+				# INSERT
+				# ------------------------------------------------------------------
+				st.subheader( 'Insert Row' )
+				insert_data = { }
+				for column, col_type in type_map.items( ):
+					if 'INT' in col_type:
+						insert_data[
+							column ] = st.number_input( column, step=1, key=f'ins_{column}' )
+					
+					elif 'REAL' in col_type:
+						insert_data[
+							column ] = st.number_input( column, format='%.6f', key=f'ins_{column}' )
+					
+					elif 'BOOL' in col_type:
+						insert_data[
+							column ] = 1 if st.checkbox( column, key=f'ins_{column}' ) else 0
+					
+					else:
+						insert_data[ column ] = st.text_input( column, key=f'ins_{column}' )
+				
+				if st.button( 'Insert Row' ):
+					cols = list( insert_data.keys( ) )
+					placeholders = ', '.join( [ '?' ] * len( cols ) )
+					stmt = f'INSERT INTO "{table}" ({", ".join( cols )}) VALUES ({placeholders});'
+					
+					with create_connection( ) as conn:
+						conn.execute( stmt, list( insert_data.values( ) ) )
+						conn.commit( )
+					
+					st.success( 'Row inserted.' )
+					st.rerun( )
+				
+				# ------------------------------------------------------------------
+				# UPDATE
+				# ------------------------------------------------------------------
+				st.subheader( 'Update Row' )
+				rowid = st.number_input( 'Row ID', min_value=1, step=1 )
+				update_data = { }
+				for column, col_type in type_map.items( ):
+					if 'INT' in col_type:
+						val = st.number_input( column, step=1, key=f'upd_{column}' )
+						update_data[ column ] = val
+					
+					elif 'REAL' in col_type:
+						val = st.number_input( column, format='%.6f', key=f'upd_{column}' )
+						update_data[ column ] = val
+					
+					elif 'BOOL' in col_type:
+						val = 1 if st.checkbox( column, key=f'upd_{column}' ) else 0
+						update_data[ column ] = val
+					
+					else:
+						val = st.text_input( column, key=f"upd_{column}" )
+						update_data[ column ] = val
+				
+				if st.button( 'Update Row' ):
+					set_clause = ', '.join( [ f'{c}=?' for c in update_data ] )
+					stmt = f'UPDATE {table} SET {set_clause} WHERE rowid=?;'
+					
+					with create_connection( ) as conn:
+						conn.execute( stmt, list( update_data.values( ) ) + [ rowid ] )
+						conn.commit( )
+					
+					st.success( 'Row updated.' )
+					st.rerun( )
+				
+				# ------------------------------------------------------------------
+				# DELETE
+				# ------------------------------------------------------------------
+				st.subheader( 'Delete Row' )
+				delete_id = st.number_input( 'Row ID to Delete', min_value=1, step=1 )
+				if st.button( 'Delete Row' ):
+					with create_connection( ) as conn:
+						conn.execute( f'DELETE FROM {table} WHERE rowid=?;', (delete_id,) )
+						conn.commit( )
+					
+					st.success( 'Row deleted.' )
+					st.rerun( )
+		
+		# ------------------------------------------------------------------------------
+		# EXPLORE
+		# ------------------------------------------------------------------------------
+		with tabs[ 3 ]:
+			tables = list_tables( )
+			if tables:
+				table = st.selectbox( 'Table', tables, key='explore_table' )
+				page_size = st.slider( 'Rows per page', 10, 500, 50 )
+				page = st.number_input( 'Page', min_value=1, step=1 )
+				offset = (page - 1) * page_size
+				df_page = read_table( table, page_size, offset )
+				st.dataframe( df_page, use_container_width=True )
+		
+		# ------------------------------------------------------------------------------
+		# FILTER
+		# ------------------------------------------------------------------------------
+		with tabs[ 4 ]:
+			tables = list_tables( )
+			if tables:
+				table = st.selectbox( 'Table', tables, key='filter_table' )
+				df = read_table( table )
+				column = st.selectbox( 'Column', df.columns )
+				value = st.text_input( 'Contains' )
+				if value:
+					df = df[ df[ column ].astype( str ).str.contains( value ) ]
+				st.dataframe( df, use_container_width=True )
+		
+		# ------------------------------------------------------------------------------
+		# AGGREGATE
+		# ------------------------------------------------------------------------------
+		with tabs[ 5 ]:
+			tables = list_tables( )
+			if tables:
+				table = st.selectbox( 'Table', tables, key='agg_table' )
+				df = read_table( table )
+				numeric_cols = df.select_dtypes( include=[ 'number' ] ).columns.tolist( )
+				if numeric_cols:
+					col = st.selectbox( 'Column', numeric_cols )
+					agg = st.selectbox( 'Function', [ 'SUM', 'AVG', 'COUNT' ] )
+					if agg == 'SUM':
+						st.metric( 'Result', df[ col ].sum( ) )
+					elif agg == 'AVG':
+						st.metric( 'Result', df[ col ].mean( ) )
+					elif agg == 'COUNT':
+						st.metric( 'Result', df[ col ].count( ) )
+		
+		# ------------------------------------------------------------------------------
+		# VISUALIZE
+		# ------------------------------------------------------------------------------
+		with tabs[ 6 ]:
+			tables = list_tables( )
+			if tables:
+				table = st.selectbox( 'Table', tables, key='viz_table' )
+				df = read_table( table )
+				numeric_cols = df.select_dtypes( include=[ 'number' ] ).columns.tolist( )
+				if numeric_cols:
+					col = st.selectbox( 'Column', numeric_cols, key='viz_column' )
+					fig = px.histogram( df, x=col )
+					st.plotly_chart( fig, use_container_width=True )
+		
+		# ------------------------------------------------------------------------------
+		# ADMIN
+		# ------------------------------------------------------------------------------
+		with tabs[ 7 ]:
+			tables = list_tables( )
+			if tables:
+				table = st.selectbox( 'Table', tables, key='admin_table' )
+			
+			st.divider( )
+			
+			st.subheader( 'Data Profiling' )
+			tables = list_tables( )
+			if tables:
+				table = st.selectbox( 'Select Table', tables, key='profile_table' )
+				if st.button( 'Generate Profile' ):
+					profile_df = create_profile_table( table )
+					st.dataframe( profile_df, use_container_width=True )
+			
+			st.subheader( 'Drop Table' )
+			
+			tables = list_tables( )
+			if tables:
+				table = st.selectbox( 'Select Table to Drop', tables, key='admin_drop_table' )
+				
+				# Initialize confirmation state
+				if 'dm_confirm_drop' not in st.session_state:
+					st.session_state.dm_confirm_drop = False
+				
+				# Step 1: Initial Drop click
+				if st.button( 'Drop Table', key='admin_drop_button' ):
+					st.session_state.dm_confirm_drop = True
+				
+				# Step 2: Confirmation UI
+				if st.session_state.dm_confirm_drop:
+					st.warning( f'You are about to permanently delete table {table}. '
+					            'This action cannot be undone.' )
+					
+					col1, col2 = st.columns( 2 )
+					
+					if col1.button( 'Confirm Drop', key='admin_confirm_drop' ):
+						try:
+							drop_table( table )
+							st.success( f'Table {table} dropped successfully.' )
+						except Exception as e:
+							st.error( f'Drop failed: {e}' )
+						
+						st.session_state.dm_confirm_drop = False
+						st.rerun( )
+					
+					if col2.button( 'Cancel', key='admin_cancel_drop' ):
+						st.session_state.dm_confirm_drop = False
+						st.rerun( )
+				
+				df = read_table( table )
+				col = st.selectbox( 'Create Index On', df.columns )
+				
+				if st.button( 'Create Index' ):
+					create_index( table, col )
+					st.success( 'Index created.' )
+			
+			st.divider( )
+			
+			st.subheader( 'Create Custom Table' )
+			new_table_name = st.text_input( 'Table Name' )
+			column_count = st.number_input( 'Number of Columns', min_value=1, max_value=20,
+				value=1 )
+			columns = [ ]
+			for i in range( column_count ):
+				st.markdown( f'### Column {i + 1}' )
+				col_name = st.text_input( 'Column Name', key=f'col_name_{i}' )
+				col_type = st.selectbox( 'Column Type', [ 'INTEGER', 'REAL', 'TEXT' ],
+					key=f'col_type_{i}' )
+				
+				not_null = st.checkbox( 'NOT NULL', key=f'not_null_{i}' )
+				primary_key = st.checkbox( 'PRIMARY KEY', key=f'pk_{i}' )
+				auto_inc = st.checkbox( 'AUTOINCREMENT (INTEGER only)', key=f'ai_{i}' )
+				
+				columns.append( {
+						'name': col_name,
+						'type': col_type,
+						'not_null': not_null,
+						'primary_key': primary_key,
+						'auto_increment': auto_inc } )
+			
+			if st.button( 'Create Table' ):
+				try:
+					create_custom_table( new_table_name, columns )
+					st.success( 'Table created successfully.' )
+					st.rerun( )
+				
+				except Exception as e:
+					st.error( f'Error: {e}' )
+			
+			st.divider( )
+			st.subheader( 'Schema Viewer' )
+			
+			tables = list_tables( )
+			if tables:
+				table = st.selectbox( 'Select Table', tables, key='schema_view_table' )
+				
+				# Column schema
+				schema = create_schema( table )
+				schema_df = pd.DataFrame(
+					schema,
+					columns=[ 'cid', 'name', 'type', 'notnull', 'default', 'pk' ] )
+				
+				st.markdown( "### Columns" )
+				st.dataframe( schema_df, use_container_width=True )
+				
+				# Row count
+				with create_connection( ) as conn:
+					count = conn.execute(
+						f'SELECT COUNT(*) FROM "{table}"'
+					).fetchone( )[ 0 ]
+				
+				st.metric( "Row Count", f"{count:,}" )
+				
+				# Indexes
+				indexes = get_indexes( table )
+				if indexes:
+					idx_df = pd.DataFrame(
+						indexes,
+						columns=[ 'seq', 'name', 'unique', 'origin', 'partial' ]
+					)
+					st.markdown( "### Indexes" )
+					st.dataframe( idx_df, use_container_width=True )
+				else:
+					st.info( "No indexes defined." )
+			
+			st.divider( )
+			st.subheader( "ALTER TABLE Operations" )
+			
+			tables = list_tables( )
+			if tables:
+				table = st.selectbox( 'Select Table', tables, key='alter_table_select' )
+				operation = st.selectbox( 'Operation',
+					[ 'Add Column', 'Rename Column', 'Rename Table', 'Drop Column' ] )
+				
+				if operation == 'Add Column':
+					new_col = st.text_input( 'Column Name' )
+					col_type = st.selectbox( 'Column Type', [ 'INTEGER', 'REAL', 'TEXT' ] )
+					
+					if st.button( 'Add Column' ):
+						add_column( table, new_col, col_type )
+						st.success( 'Column added.' )
+						st.rerun( )
+				
+				elif operation == 'Rename Column':
+					schema = create_schema( table )
+					col_names = [ col[ 1 ] for col in schema ]
+					
+					old_col = st.selectbox( 'Column to Rename', col_names )
+					new_col = st.text_input( 'New Column Name' )
+					
+					if st.button( 'Rename Column' ):
+						rename_column( table, old_col, new_col )
+						st.success( 'Column renamed.' )
+						st.rerun( )
+				
+				elif operation == 'Rename Table':
+					new_name = st.text_input( 'New Table Name' )
+					
+					if st.button( 'Rename Table' ):
+						rename_table( table, new_name )
+						st.success( 'Table renamed.' )
+						st.rerun( )
+				
+				elif operation == 'Drop Column':
+					schema = create_schema( table )
+					col_names = [ col[ 1 ] for col in schema ]
+					
+					drop_col = st.selectbox( 'Column to Drop', col_names )
+					
+					if st.button( 'Drop Column' ):
+						drop_column( table, drop_col )
+						st.success( 'Column dropped.' )
+						st.rerun( )
+		
+		# ------------------------------------------------------------------------------
+		# SQL
+		# ------------------------------------------------------------------------------
+		with tabs[ 8 ]:
+			st.subheader( 'SQL Console' )
+			query = st.text_area( 'Enter SQL Query' )
+			if st.button( 'Run Query' ):
+				if not is_safe_query( query ):
+					st.error( 'Query blocked: Only read-only SELECT statements are allowed.' )
+				else:
+					try:
+						start_time = time.perf_counter( )
+						with create_connection( ) as conn:
+							result = pd.read_sql_query( query, conn )
+						
+						end_time = time.perf_counter( )
+						elapsed = end_time - start_time
+						
+						# ----------------------------------------------------------
+						# Display Results
+						# ----------------------------------------------------------
+						st.dataframe( result, use_container_width=True )
+						row_count = len( result )
+						
+						# ----------------------------------------------------------
+						# Execution Metrics
+						# ----------------------------------------------------------
+						col1, col2 = st.columns( 2 )
+						col1.metric( 'Rows Returned', f'{row_count:,}' )
+						col2.metric( 'Execution Time (seconds)', f'{elapsed:.6f}' )
+						
+						# Optional slow query warning
+						if elapsed > 2.0:
+							st.warning( 'Slow query detected (> 2 seconds). Consider indexing.' )
+						
+						# ----------------------------------------------------------
+						# Download
+						# ----------------------------------------------------------
+						if not result.empty:
+							csv = result.to_csv( index=False ).encode( 'utf-8' )
+							st.download_button( 'Download CSV', csv,
+								'query_results.csv', 'text/csv' )
+					
+					except Exception as e:
+						st.error( f'Execution failed: {e}' )
+
+# ==============================================================================
+# FOOTER — SECTION
+# ==============================================================================
+st.markdown(
+	"""
+	<style>
+	.block-container {
+		padding-bottom: 3rem;
+	}
+	</style>
+	""",
+	unsafe_allow_html=True,
+)
+
+# ---- Fixed Container
+st.markdown(
+	"""
+	<style>
+	.boo-status-bar {
+		position: fixed;
+		bottom: 0;
+		left: 0;
+		width: 100%;
+		background-color: rgba(27, 27, 27, 0.95);
+		border-top: 1px solid #4d4d4d;
+		padding: 10px 16px;
+		font-size: 0.80rem;
+		color: #4aa2f7;
+		z-index: 1000;
+	}
+	.boo-status-inner {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		max-width: 100%;
+	}
+	</style>
+	""", unsafe_allow_html=True, )
+
+# ======================================================================================
+# FOOTER RENDERING
+# ======================================================================================
+
+right_parts: List[ str ] = [ ]
+model = 'Leeroy'
+
+mode_value = mode if mode is not None else st.session_state.get( 'mode' )
+if mode_value:
+	right_parts.append( f'Mode: {mode_value}' )
+
+temperature = st.session_state.get( 'temperature' )
+top_p = st.session_state.get( 'top_percent' )
+top_k = st.session_state.get( 'top_k' )
+frequency = st.session_state.get( 'frequency_penalty' )
+presense = st.session_state.get( 'presense_penalty' )
+repeat_penalty = st.session_state.get( 'repeat_penalty' )
+max_tokens = st.session_state.get( 'max_tokens' )
+context_window = st.session_state.get( 'context_window' )
+cpu_threads = st.session_state.get( 'cpu_threads' )
+repeat_window = st.session_state.get( 'repeat_window' )
+use_semantic = st.session_state.get( 'use_semantic' )
+basic_docs = st.session_state.get( 'basic_docs' )
+
+# ------------------------------------------------------------------
+# Parameter summary (show 0 values; suppress only when None)
+# ------------------------------------------------------------------
+if temperature is not None:
+	right_parts.append( f'Temp: {float( temperature ):0.2f}' )
+
+if top_p is not None:
+	right_parts.append( f'Top-P: {float( top_p ):0.2f}' )
+
+if top_k is not None:
+	right_parts.append( f'Top-K: {int( top_k )}' )
+
+if frequency is not None:
+	right_parts.append( f'Freq: {float( frequency ):0.2f}' )
+
+if presense is not None:
+	right_parts.append( f'Presence: {float( presense ):0.2f}' )
+
+if repeat_penalty is not None:
+	right_parts.append( f'Repeat: {float( repeat_penalty ):0.2f}' )
+
+if repeat_window is not None:
+	right_parts.append( f'Repeat Window: {int( repeat_window )}' )
+
+if max_tokens is not None:
+	right_parts.append( f'Max Tokens: {int( max_tokens )}' )
+
+if context_window is not None:
+	right_parts.append( f'Context: {int( context_window )}' )
+
+if cpu_threads is not None:
+	right_parts.append( f'Threads: {int( cpu_threads )}' )
+
+# ------------------------------------------------------------------
+# Context flags (optional but useful)
+# ------------------------------------------------------------------
+if use_semantic is not None:
+	right_parts.append( f'Semantic: {"On" if use_semantic else "Off"}' )
+
+if isinstance( basic_docs, list ):
+	right_parts.append( f'Docs: {len( basic_docs )}' )
+
+right_text = ' ◽ '.join( right_parts ) if right_parts else '—'
+
+# ---- Rendering Method
+st.markdown(
+	f"""
+    <div class="boo-status-bar">
+        <div class="boo-status-inner">
+            <span>{model}</span>
+            <span>{right_text}</span>
+        </div>
+    </div>
+    """,
+	unsafe_allow_html=True, )
